@@ -1,7 +1,8 @@
 
-//#include <boost/bimap.hpp>
 #include <iostream>
 #include <curses.h>
+#include <list>
+//#include <string.h>
 #include <stdlib.h>
 #include <math.h> 
 using namespace std;
@@ -16,27 +17,15 @@ typedef std::bitset<3> Sdna;
 typedef unsigned int  uint;
 
 
-/*
-struct Comparer {
-    bool operator() (const bitset<3> &b1, const bitset<3> &b2) const {
-        return b1.to_ulong() < b2.to_ulong();
-    }
-};*/
 
 struct base{
     Sdna code;           // store AGCTN
     uint quality = 0;    // store quality as int converted
 };
 
-//typedef vector< Sdna, char > dnamap;
-//typedef vector< char, Sdna > bitmap;
+
 
 typedef std::vector < base > Tdna; 
-
-
-//typedef boost::bimap< boost::bimaps::set_of<Sdna *, dnasetCMP> , int> dnamap;
-//typedef dnamap::value_type dnamapVT;
-typedef char baseT;
 
 struct color {
     uint R;

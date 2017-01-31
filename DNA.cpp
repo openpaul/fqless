@@ -76,7 +76,10 @@ void DNA::addQuality(string& qal){
 	uint i = 0;
 	for(auto it = qal.begin(); it != qal.end(); ++it) {
 		q = static_cast<uint>(*it);
-        sequence[i].quality = q;
+		
+		if( i < sequence.size()){
+            sequence[i].quality = q;
+        }
 		i++;
 	}
 }

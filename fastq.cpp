@@ -1,10 +1,115 @@
 #include "fastq.h"
 
+
+
+
+fastq::fastq(const char* inPath){
+
+    string line; 
+    isFastq     = false;
+    isFasta     = false;
+    file        = inPath;
+
+    // determine the amount of seq in the file
+    countSequences(inPath);
+
+    return;
+}
+
+int fastq::readmore(int offset, int bsize, int cols, int dir, WINDOW* Wtext){
+    //dir 1 down 0 up
+    string line;
+    uint bfull;
+    bfull = 0;
+    uint i = 0;
+    uint relPos = 0;
+    
+
+    
+    if( offset != 0 ){
+        // need to skip some rows apparently
+    }
+    
+    ifstream infile;
+	infile.open(file);
+	if(infile.is_open()){
+	
+	    int number;
+        string name;
+        string dnaseq;
+        string qualseq;
+            
+	    while( bfull < bsize and getline(infile, line)){
+	    
+	        // each sequence of fastq
+	        // fills at least two lines, name and spacer
+	        // then the chars are counted and divisted by cols
+            
+            
+	        if(relPos == 0){
+			    // this is the name, line
+			    // make new entry into content
+			    name     = line.erase(0, 1);;
+			    number   = i;
+			    i++;
+		    }else if(relPos == 1){
+			    // this should be DNA
+			    dnaseq = line;
+			    
+		    }else if(relPos == 3){
+		       
+		      
+		        // this should quality data
+                qualseq         = line;
+			    
+			    // now create the fastq seq and put it in the right place
+	            fastqSeq b;
+	            	            
+	            b.name          = name;
+	            b.number        = number;
+	            setDNAline(b, dnaseq);
+	            addQualityData(b,qualseq);
+	            
+	            // update the bfull variable
+	            bfull = bfull + 2 + ceil((float)b.dna.sequence.size()/(float)cols) ;
+	            //            name   rows of DNA              space
+
+	            // now put the sequence into the content variable, so it can be accessed
+	            if(dir == 1){
+	                content.push_back(b);
+	            }else{
+	                // else put each sequence at a certain position 
+	                // in front of the content we already have
+	                //content.push_back(b);
+	                auto it = content.begin();
+	                advance(it, i);
+	                content.insert(it, b);
+	            }
+	           
+		    }
+		    
+			relPos++;
+			if( relPos == 4 ){
+			     // reset the relative Position counter
+	            relPos          = 0;
+			}
+		    
+	    }
+	}
+	
+	// close up
+	infile.close();
+    
+    return bfull;
+}
+
+/*
 fastq::fastq(const char*  inPath){
     
 	string line; 
     isFastq = false;
     isFasta = false;
+    
     
     // determine the amount of seq in the file
     countSequences(inPath);
@@ -60,7 +165,7 @@ fastq::fastq(const char*  inPath){
 	}else{
 		cout << "File is not existing or unable to open" << std::endl;
 	}
-}
+}*/
 
 void fastq::countSequences(const char* inPath){
     /*
@@ -98,10 +203,10 @@ void fastq::countSequences(const char* inPath){
 }
 
 
-void fastq::setDNAline(string& sDNA){
-	content.back().dna.append(sDNA);
+void fastq::setDNAline(fastqSeq& b, string& sDNA){
+	b.dna.append(sDNA);
 }
 
-void fastq::addQualityData(string& qual){
-	content.back().dna.addQuality(qual);   
+void fastq::addQualityData(fastqSeq& b, string& qual){
+	b.dna.addQuality(qual);   
 }

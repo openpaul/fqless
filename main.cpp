@@ -1,5 +1,5 @@
 #include <stdio.h>
-
+#include "options.h"
 
 
 
@@ -10,24 +10,92 @@
 string version = "Version 0.1 Alpha";
 
 
-WINDOW *textfield; // main window
-WINDOW *commandline; // make windows possible
+WINDOW * Wtext;
+WINDOW * Wcmd;
+WINDOW * lNumb;
 
+
+
+
+
+
+int buffersize = 2;
 
 void quit(){
-    delwin(textfield);
-    delwin(commandline);
+    delwin(Wtext);
+    delwin(Wcmd);
     endwin();
 }
 
-void nextLine(){
-    //int x, y;
-    // move curser to next line
-    //getyx(stdscr, y, x);
-    //printw("Koordinatenursprung:       [%d, %d]", y, x);
-    //move(y+1, 0);
-    
+void winInit(options * opts){
 
+    opts->textrows = LINES-5;
+    if(opts->linenumbers){     
+        opts->textcols = COLS-1;
+    }else{
+        opts->textcols = COLS;
+    }
+    Wcmd            = newwin(1, COLS, opts->textrows+4, 0);
+    Wtext           = newpad(buffersize*opts->textrows, opts->textcols);
+    
+    // init line number pad
+    if(opts->linenumbers){
+        lNumb       = newpad(buffersize*opts->textrows, opts->linenumberspace);
+    }
+    
+    keypad(Wcmd, TRUE);
+}
+
+
+
+void fillPad(options* opts, int offset, fastq* FQ, int dir=1){
+    int b;
+    int bmore;
+    b       = buffersize*opts->textrows;
+    bmore   = FQ->readmore(offset, b, opts->textcols, dir, Wtext);
+    
+    // we may need to make space for a sequence that a little bit larger then 
+    // the buffer and thus then we expected
+   // wprintw(Wtext, "Lines %i and we req %i, so resize", bmore, b);
+    if(bmore != b and bmore > 0){
+      // wprintw(Wtext, "We should ");
+        bool a = wresize(Wtext, bmore, opts->textcols);
+        if(a){
+            wprintw(Wtext, "Lines %i and we req %i, so resize", bmore, b);
+        }else{
+        wprintw(Wtext, "nope");
+        }
+    }
+
+
+    int i = 0; // keep track of lines
+    for(auto it = FQ->content.begin(); it != FQ->content.end(); ++it) {
+        fastqSeq fq = *it;
+        
+        if(i > 0) wprintw(Wtext, "\n"); // spacer
+        // paint the name
+        wattron(Wtext, COLOR_PAIR(1));
+        wprintw(Wtext, fq.name.c_str());
+	    wattroff(Wtext, COLOR_PAIR(1));
+        wprintw(Wtext, "\n");
+
+        // print sequence
+        fq.dna.printColoredDNA(Wtext);
+        wprintw(Wtext, "\n");
+        
+        
+        i = i + 2 + ceil(fq.dna.sequence.size()/COLS) ;
+    }
+
+     
+     
+     // set line numbers
+     for(uint i = 1; i <= buffersize*opts->textrows; i++){
+        wattron(lNumb, COLOR_PAIR(1));
+        wprintw(lNumb, "%i\n", i);
+     }
+     wattroff(lNumb, COLOR_PAIR(1));
+     
 }
  
 
@@ -35,92 +103,31 @@ void nextLine(){
 
 int main(int argc, char * argv[]) {
     
-   // int x, y;
+    options* opts;
+    opts->linenumbers = true;
+    if(opts->linenumbers){
+        opts->linenumberspace = 5;
+    }else{
+        opts->linenumberspace = 0;
+    }
     
-
-    initscr();
-    start_color();
-//    use_default_colors();
-    assume_default_colors(-1,-1);
-      atexit(quit);
-    //init_color(COLOR_WHITE, 1000,1000,1000);
-   //init_pair(1, COLOR_WHITE, COLOR_BLACK);
-    init_pair(1, COLOR_WHITE, -1);
-  //  keypad(stdscr, TRUE);
-    // draw welcome display
-   // curs_set(0);
-   
-   // set sscrolling region
-
-   
- 
+    opts->offset = 0;
     
     
-    commandline = newwin(1, COLS, LINES-1, 0);
-    textfield   = newwin(LINES-1, COLS, 0, 0);
-    wsetscrreg(textfield, 0, LINES-1);
-    scrollok(textfield, TRUE);
-//    
-   // mvwprintw(textfield,3, 5, "LINES: %d", LINES);
-   // mvprintw(4, 5, "COLS:  %d", COLS);
 
-    //bkgd(COLOR_PAIR(1));
-    //wbkgd(textfield, COLOR_PAIR(2));
-    //refresh();
-     //  wrefresh(commandline);
-      //  wrefresh(textfield);;
-/* 
-initscr();			
- 
-	if(has_colors() == FALSE)
-	{	endwin();
-		printf("Your terminal does not support color\n");
-		exit(1);
-	}
-	start_color();			
+    initscr();                      // start ncurses
+    curs_set(0);                    // hide cursor
+    start_color();                  // start color mode
+    assume_default_colors(-1,-1);   // make transparent mode possible if supported
+    atexit(quit);                   // what to do at exit
+    init_pair(1, -1, -1);           // default colors, white on standart background
 
-
-    init_color(COLOR_RED, 100, 100, 0);
+    winInit(opts);
     
-	init_pair(1, COLOR_RED, COLOR_BLACK);
+    // keep track of offset of file
+    int offset;
+    offset = 0;
 
-	attron(COLOR_PAIR(1));
-	print_in_middle(stdscr, LINES / 2, 0, 0, "Viola !!! In color ...");
-	attroff(COLOR_PAIR(1));
-    	getch();
-	endwin();
-
-
-
-
-    getyx(stdscr, y, x);
-    mvprintw(5, 5, "Momentane Cursorposition:  [%d, %d]", y, x);
-    printw("A");
-    printw("A");
-    printw("A");
-    printw("A");
-    printw("A");
-    printw("A");
-    printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");printw("A");
-
-    getbegyx(stdscr, y, x);
-    mvprintw(6, 5, "Koordinatenursprung:       [%d, %d]", y, x);
-
-    getmaxyx(stdscr, y, x);
-    mvprintw(7, 5, "Fenstergrße:              [%d, %d]", y, x);
-
-    mvaddstr(11, 2, "Taste drücken -> Ende");
-
-    
-
-
-
-    
-
-    */
-    
-   // cout << "fastq reader " << version << std::endl;
-   // cout << std::endl;
     
     // lets define options and defaults
     char* input;
@@ -177,52 +184,67 @@ initscr();
         fastq* FQ = new fastq(input);
         
         // update status
-        mvwprintw(commandline, 0,0, "File contains %d Sequences ", FQ->nOfSequences);
-/*
+        mvwprintw(Wcmd, 0,0, "File contains %d Sequences ", FQ->nOfSequences);
+
+        
+        // update pad
+        fillPad(opts, 0, FQ);
+        
+        refresh();
+        prefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
+        prefresh(lNumb, offset,0,0, 0, opts->textrows, opts->linenumberspace);
+        wrefresh(Wcmd);
+
         int ch;
-        while ((ch = getch()) != KEY_F(1)) {
-            switch (ch) {
-            case KEY_DOWN:
-	            //form_driver(form, REQ_NEXT_FIELD);
-	            //form_driver(form, REQ_END_LINE);
-	            break;
 
+        noecho();
+        while(1) {
+            ch = wgetch(Wcmd);
+            
+
+            //wechochar(Wtext, ch);
+            //wrefresh(Wtext);
+            switch(ch){
             case KEY_UP:
-	            //form_driver(form, REQ_PREV_FIELD);
-	            //form_driver(form, REQ_END_LINE);
+	            offset--;
+	            if(offset < 0) offset = 0;
+	            //refresh();
+	            mvwprintw(Wcmd, 0,0, "offset %i lines %i ", offset, buffersize*(LINES-1));
+	            prefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
+                prefresh(lNumb, offset,0,0, 0, opts->textrows, opts->linenumberspace);
 	            break;
 
- 
+            case KEY_DOWN:
+	            
+	            //refresh();
+	            if( offset < (buffersize-1)*opts->textrows-1 ){
+    	            offset++;
+	                mvwprintw(Wcmd, 0,0, "offset %i lines %i ", offset, buffersize*(LINES-1));
+                    prefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
+                    prefresh(lNumb, offset,0,0, 0, opts->textrows, opts->linenumberspace);
+                    
+                }    
+                 
+	            break;
+
             case KEY_NPAGE:
-	            //form_driver(form, REQ_NEXT_PAGE);
-	            //set_form_page(form, ++cur_page);
+
 	            break;
 
             case KEY_PPAGE:
 	            //form_driver(form, REQ_PREV_PAGE);
 	            //set_form_page(form, --cur_page);
 	            break;
+	        case KEY_RESIZE:
+	            
+                endwin();
+                winInit(opts);
+                fillPad(opts, offset, FQ);
+                refresh();
+                prefresh(Wtext, offset,0,0, 0, LINES-1, COLS);  
+	            break;
             }
-        }*/
-        
-        
-        for(uint i = 0; i < FQ->content.size(); i++){
-            // print name
-
-		    wattron(textfield, COLOR_PAIR(1));
-            const string name = FQ->content[i].name;
-		    wattron(textfield, COLOR_PAIR(1));
-            wprintw(textfield, "\n");
-            wprintw(textfield, name.c_str());
-            wprintw(textfield, "\n");
-
-            // print sequence
-            FQ->content[i].dna.printColoredDNA(textfield);
-            wprintw(textfield, "\n");
-        }
-        refresh();    
-        wrefresh(commandline);
-        wrefresh(textfield);
+        }  
           
         getch();
         //cout << "COLORS" << COLORS;
