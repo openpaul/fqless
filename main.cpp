@@ -51,20 +51,22 @@ void winInit(options * opts){
 void fillPad(options* opts, int offset, fastq* FQ, int dir=1){
     int b;
     int bmore;
-    b       = buffersize*opts->textrows;
-    bmore   = FQ->readmore(offset, b, opts->textcols, dir, Wtext);
+    opts->avaiLines   = buffersize*opts->textrows;
+    bmore               = FQ->readmore(offset, opts->avaiLines, opts->textcols, dir, Wtext);
     
     // we may need to make space for a sequence that a little bit larger then 
     // the buffer and thus then we expected
-   // wprintw(Wtext, "Lines %i and we req %i, so resize", bmore, b);
-    if(bmore != b and bmore > 0){
+    wprintw(Wtext, "Lines %i ", opts->avaiLines);
+    //wprintw(Wtext, "Lines %i and we req %i, so resize\n", bmore, opts->avaiLines);
+    if(bmore != opts->avaiLines and bmore > 0){
       // wprintw(Wtext, "We should ");
-        bool a = wresize(Wtext, bmore, opts->textcols);
-        if(a){
-            wprintw(Wtext, "Lines %i and we req %i, so resize", bmore, b);
-        }else{
-        wprintw(Wtext, "nope");
-        }
+        opts->avaiLines = bmore;
+        wresize(Wtext, opts->avaiLines, opts->textcols);
+        wresize(lNumb, opts->avaiLines, opts->linenumberspace);
+       // wprintw(Wtext, "COLS %i ROWS %i\n", opts->linenumberspace, opts->avaiLines);
+
+        //opts->textrows = LINES-5;
+        wprintw(Wtext, "Lines %i ", opts->avaiLines);
     }
 
 
@@ -88,9 +90,9 @@ void fillPad(options* opts, int offset, fastq* FQ, int dir=1){
     }
 
      
-     
+      //wprintw(Wtext, "AHHHH %i ", opts->avaiLines);
      // set line numbers
-     for(uint i = 1; i <= buffersize*opts->textrows; i++){
+     for(uint i = 1; i <= opts->avaiLines; i++){
         wattron(lNumb, COLOR_PAIR(1));
         wprintw(lNumb, "%i\n", i);
      }
@@ -210,17 +212,17 @@ int main(int argc, char * argv[]) {
 	            if(offset < 0) offset = 0;
 	            //refresh();
 	            mvwprintw(Wcmd, 0,0, "offset %i lines %i ", offset, buffersize*(LINES-1));
-	            prefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
+	            pnoutrefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
                 prefresh(lNumb, offset,0,0, 0, opts->textrows, opts->linenumberspace);
 	            break;
 
             case KEY_DOWN:
 	            
 	            //refresh();
-	            if( offset < (buffersize-1)*opts->textrows-1 ){
+	            if( offset < (opts->avaiLines - opts->textrows) -1){ // TODO why the 1? lets find out later
     	            offset++;
 	                mvwprintw(Wcmd, 0,0, "offset %i lines %i ", offset, buffersize*(LINES-1));
-                    prefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
+                    pnoutrefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
                     prefresh(lNumb, offset,0,0, 0, opts->textrows, opts->linenumberspace);
                     
                 }    
