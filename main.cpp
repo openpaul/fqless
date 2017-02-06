@@ -19,7 +19,7 @@ WINDOW * lNumb;
 
 
 
-int buffersize = 2;
+int buffersize = 50;
 
 void quit(){
     //delwin(Wtext);
@@ -38,13 +38,13 @@ void showTheVersion(){
 
 void winInit(options * opts){
 
-    opts->textrows = LINES-5;
+    opts->textrows = LINES-2;
     if(opts->linenumbers){     
-        opts->textcols = COLS-1;
+        opts->textcols = COLS-5;
     }else{
         opts->textcols = COLS;
     }
-    Wcmd            = newwin(1, COLS, opts->textrows+4, 0);
+    Wcmd            = newwin(1, COLS, opts->textrows+1, 0);
     Wtext           = newpad(buffersize*opts->textrows, opts->textcols);
     
     // init line number pad
@@ -69,8 +69,8 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
     //wprintw(Wtext, "Index size %i \n",  FQ->index.size());
     if(opts->linesTohave != opts->avaiLines){
         opts->avaiLines = opts->linesTohave;
-        wresize(Wtext, opts->avaiLines, opts->textcols);
-        wresize(lNumb, opts->avaiLines, opts->linenumberspace);
+        wresize(Wtext, opts->avaiLines+1, opts->textcols);
+        wresize(lNumb, opts->avaiLines+1, opts->linenumberspace);
     }
 
 
@@ -95,7 +95,7 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
         // print sequence
         fq.dna.printColoredDNA(Wtext);
         wprintw(Wtext, "\n");
-        fq.inpad    = true;
+        //fq.inpad    = true;
         
         i = i + 2 + ceil(fq.dna.sequence.size()/COLS) ;
     }
@@ -249,7 +249,6 @@ int main(int argc, char * argv[]) {
             switch(ch){
                 case KEY_UP:
 	                opts->offset--;
-
 	                if(opts->offset < 0 and opts->firstInPad > 0) {
 
 	                    FQ->showthese(opts, 0, Wtext);
@@ -258,33 +257,26 @@ int main(int argc, char * argv[]) {
 	                }
                     if(opts->offset < 0){opts->offset = 0;} 
 	                
-
 	                mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
 	                pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
                     prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
 	                break;
 
                 case KEY_DOWN:
-	                
-	                //refresh();
-	                if( opts->offset < (opts->avaiLines - opts->textrows -1)){ // TODO why the 1? lets find out later 
+	                opts->offset++;
 
-        	            opts->offset++;
-	                    mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
+	                if( opts->offset > (opts->avaiLines - opts->textrows -2) && (opts->lastInPad < FQ->index.size())){
+	                    FQ->showthese(opts, 1, Wtext);
+	                    fillPad(opts, FQ);
+	                }
+	                if(opts->offset > (opts->avaiLines - opts->textrows - 1)){
+	                    opts->offset = opts->avaiLines - opts->textrows -1;
+	                }
+	                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
                         pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
                         prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
                         
-                    }else if(opts->lastInPad < FQ->index.size()){
-                        // ok, we reached the end, load more if there is any
-                         // update pad
-                       FQ->showthese(opts, 1, Wtext);
-                       opts->offset+2;
-                       fillPad(opts, FQ);
-                        
-                        mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
-                        pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
-                        prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
-                    }  
+
                      
 	                break;
 

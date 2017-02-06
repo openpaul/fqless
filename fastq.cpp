@@ -237,6 +237,11 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     
     // ok, indexing is done, now lets find out what to show
     int linesBelowAndUp = round(opts->avaiLines/2);
+    if(linesBelowAndUp < opts->textrows){
+        // this fixes a bug, whne the window is larger then half
+        // the buffer which then allows escaping of the window
+        linesBelowAndUp = opts->textrows + 1;
+    }
 
     
     // scroll N lines up in both cases
@@ -271,6 +276,7 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
         i++;
         opts->lastInPad = i;
     }
+    
 
     opts->linesTohave = j;
     wprintw(Wtext, "first %i and last %i  offset %i seq in %i\n",  opts->firstInPad, opts->lastInPad, opts->offset,  opts->lastInPad - opts->firstInPad);
