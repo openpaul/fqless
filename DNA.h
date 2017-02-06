@@ -10,7 +10,8 @@ using namespace std;
 #include <vector>
 #include <bitset>
 #include <map>
-
+#include <future>
+#include "options.h"
 
 
 typedef std::bitset<3> Sdna;

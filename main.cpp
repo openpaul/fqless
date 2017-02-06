@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include "options.h"
+
 
 
 
@@ -22,9 +22,18 @@ WINDOW * lNumb;
 int buffersize = 2;
 
 void quit(){
-    delwin(Wtext);
-    delwin(Wcmd);
+    //delwin(Wtext);
+    //delwin(Wcmd);
     endwin();
+}
+
+void showTheHelp(){
+    cout << "This would be the help" << std::endl;
+}
+
+
+void showTheVersion(){
+    cout << version << std::endl;
 }
 
 void winInit(options * opts){
@@ -48,32 +57,34 @@ void winInit(options * opts){
 
 
 
-void fillPad(options* opts, int offset, fastq* FQ, int dir=1){
-    int b;
-    int bmore;
-    opts->avaiLines   = buffersize*opts->textrows;
-    bmore               = FQ->readmore(offset, opts->avaiLines, opts->textcols, dir, Wtext);
+void fillPad(options* opts, fastq* FQ, int dir=1){
+    
+    // clean the pad now
+    wclear(Wtext); 
+    wclear(lNumb);
     
     // we may need to make space for a sequence that a little bit larger then 
     // the buffer and thus then we expected
-    wprintw(Wtext, "Lines %i ", opts->avaiLines);
-    //wprintw(Wtext, "Lines %i and we req %i, so resize\n", bmore, opts->avaiLines);
-    if(bmore != opts->avaiLines and bmore > 0){
-      // wprintw(Wtext, "We should ");
-        opts->avaiLines = bmore;
+
+    //wprintw(Wtext, "Index size %i \n",  FQ->index.size());
+    if(opts->linesTohave != opts->avaiLines){
+        opts->avaiLines = opts->linesTohave;
         wresize(Wtext, opts->avaiLines, opts->textcols);
         wresize(lNumb, opts->avaiLines, opts->linenumberspace);
-       // wprintw(Wtext, "COLS %i ROWS %i\n", opts->linenumberspace, opts->avaiLines);
-
-        //opts->textrows = LINES-5;
-        wprintw(Wtext, "Lines %i ", opts->avaiLines);
     }
 
 
     int i = 0; // keep track of lines
-    for(auto it = FQ->content.begin(); it != FQ->content.end(); ++it) {
-        fastqSeq fq = *it;
+    int j = 1; // offset in line numbers
+    for(auto& it: FQ->content) {
+        fastqSeq& fq = it;
         
+        if(fq.inpad == false){
+            //fq.inpad = false;            
+            j = j + 2 + ceil(fq.dna.sequence.size()/COLS) ;
+            continue;
+        }
+                
         if(i > 0) wprintw(Wtext, "\n"); // spacer
         // paint the name
         wattron(Wtext, COLOR_PAIR(1));
@@ -84,60 +95,47 @@ void fillPad(options* opts, int offset, fastq* FQ, int dir=1){
         // print sequence
         fq.dna.printColoredDNA(Wtext);
         wprintw(Wtext, "\n");
-        
+        fq.inpad    = true;
         
         i = i + 2 + ceil(fq.dna.sequence.size()/COLS) ;
     }
 
      
-      //wprintw(Wtext, "AHHHH %i ", opts->avaiLines);
+
      // set line numbers
-     for(uint i = 1; i <= opts->avaiLines; i++){
+     for(int i = j; i <= opts->avaiLines; i++){
         wattron(lNumb, COLOR_PAIR(1));
         wprintw(lNumb, "%i\n", i);
      }
      wattroff(lNumb, COLOR_PAIR(1));
-     
+       
 }
  
 
 
 
 int main(int argc, char * argv[]) {
+   
+    options * opts  =  new options();
     
-    options* opts;
     opts->linenumbers = true;
+    
     if(opts->linenumbers){
         opts->linenumberspace = 5;
     }else{
         opts->linenumberspace = 0;
     }
-    
+ 
     opts->offset = 0;
-    
-    
-
-    initscr();                      // start ncurses
-    curs_set(0);                    // hide cursor
-    start_color();                  // start color mode
-    assume_default_colors(-1,-1);   // make transparent mode possible if supported
-    atexit(quit);                   // what to do at exit
-    init_pair(1, -1, -1);           // default colors, white on standart background
-
-    winInit(opts);
-    
-    // keep track of offset of file
-    int offset;
-    offset = 0;
+    opts->tellg  = 0;
 
     
-    // lets define options and defaults
+    
+     // lets define options and defaults
     char* input;
-    int do_verbose, do_help, c;
+    int showVersion,showHelp, c, ch;
     string outputDir;
 
-    
-    
     
     const struct option longopts[] =
     {
@@ -147,32 +145,29 @@ int main(int argc, char * argv[]) {
         {0,0,0,0},
     };
 
-    int index;
-    int iarg=0;
+    //int index;
+    //int iarg=0;
 
     //turn off getopt error message
     opterr=1; 
 
-    while((c = getopt_long(argc, argv, ":hvi::W;", longopts, NULL)) != -1){ 
+    while((c = getopt_long(argc, argv, ":hvi:W;", longopts, NULL)) != -1){ 
         switch (c) {
         case 'i':
             input = optarg;
             break;
         case 'h':
-            do_help = 1;
+            showHelp = 1;
         case 'v':
-            do_verbose = 1;
-            break;
+            showVersion = 1;
         case 0:     
             break;
-
         case 1:
-        break;
+            break;
         case ':': 
             fprintf(stderr, "%s: option `-%c' requires an argument\n",
                     argv[0], optopt);
             break;
-        case '?':
         default:  
             fprintf(stderr, "%s: option `-%c' is invalid: ignored\n",
                     argv[0], optopt);
@@ -180,76 +175,130 @@ int main(int argc, char * argv[]) {
         }
     }
 
+    
+    if(showHelp == 1){
+       // quit();
+        showTheHelp();
+        exit(0);
+    }
+    if(showVersion == 1){
+       // quit();
+        showTheVersion();
+        exit(0);
+    }
+
+   
+    
+
 
     
+   
+    
     if(input != NULL){
+    
+        initscr();                      // start ncurses
+        curs_set(0);                    // hide cursor
+        start_color();                  // start color mode
+        assume_default_colors(-1,-1);   // make transparent mode possible if supported
+        atexit(quit);                   // what to do at exit
+        init_pair(1, -1, -1);           // default colors, white on standart background
+        
+        winInit(opts);  
+        noecho();             
+        opts->avaiLines   = buffersize*opts->textrows;
+    
+    
         fastq* FQ = new fastq(input);
+        // here we can build the first index
+        // it should index as much as the first buffer only
+        FQ->buildIndex(opts);
+        FQ->showthese(opts, 1, Wtext);
+
+        // then we read the first buffer and show it
+        
+        
         
         // update status
         mvwprintw(Wcmd, 0,0, "File contains %d Sequences ", FQ->nOfSequences);
 
         
         // update pad
-        fillPad(opts, 0, FQ);
+        fillPad(opts, FQ);
+        
         
         refresh();
-        prefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
-        prefresh(lNumb, offset,0,0, 0, opts->textrows, opts->linenumberspace);
+        prefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
+        prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
         wrefresh(Wcmd);
+        
+        
+        // launcyh an async thread to build an index
+        // async because, we do not need this to continue 
+        // but it is needed later to quickly load more data
+        auto indexThread = std::async(std::launch::async, &fastq::buildIndex, FQ, opts);
 
-        int ch;
 
-        noecho();
+        
+
+        
         while(1) {
             ch = wgetch(Wcmd);
             
-
-            //wechochar(Wtext, ch);
-            //wrefresh(Wtext);
             switch(ch){
-            case KEY_UP:
-	            offset--;
-	            if(offset < 0) offset = 0;
-	            //refresh();
-	            mvwprintw(Wcmd, 0,0, "offset %i lines %i ", offset, buffersize*(LINES-1));
-	            pnoutrefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
-                prefresh(lNumb, offset,0,0, 0, opts->textrows, opts->linenumberspace);
-	            break;
+                case KEY_UP:
+	                opts->offset--;
+	                if(opts->offset < 0) {
+	                    fillPad(opts, FQ, 0);
+	                }
+	                
 
-            case KEY_DOWN:
-	            
-	            //refresh();
-	            if( offset < (opts->avaiLines - opts->textrows) -1){ // TODO why the 1? lets find out later
-    	            offset++;
-	                mvwprintw(Wcmd, 0,0, "offset %i lines %i ", offset, buffersize*(LINES-1));
-                    pnoutrefresh(Wtext, offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
-                    prefresh(lNumb, offset,0,0, 0, opts->textrows, opts->linenumberspace);
-                    
-                }    
-                 
-	            break;
+	                mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
+	                pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
+                    prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+	                break;
 
-            case KEY_NPAGE:
+                case KEY_DOWN:
+	                
+	                //refresh();
+	                if( opts->offset < (opts->avaiLines - opts->textrows) -1){ // TODO why the 1? lets find out later
+        	            opts->offset++;
+	                    mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
+                        pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
+                        prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+                        
+                    }else{
+                        // ok, we reached the end, load more if there is any
+                         // update pad
+                        fillPad(opts, FQ);
+                        opts->offset++;
+                        mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
+                        pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
+                        prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+                    }  
+                     
+	                break;
 
-	            break;
+                case KEY_NPAGE:
 
-            case KEY_PPAGE:
-	            //form_driver(form, REQ_PREV_PAGE);
-	            //set_form_page(form, --cur_page);
-	            break;
-	        case KEY_RESIZE:
-	            
-                endwin();
-                winInit(opts);
-                fillPad(opts, offset, FQ);
-                refresh();
-                prefresh(Wtext, offset,0,0, 0, LINES-1, COLS);  
-	            break;
+	                break;
+
+                case KEY_PPAGE:
+	                //form_driver(form, REQ_PREV_PAGE);
+	                //set_form_page(form, --cur_page);
+	                break;
+	            case KEY_RESIZE:
+	                
+                    endwin();
+                    winInit(opts);
+                    fillPad(opts, FQ);
+                    refresh();
+                    prefresh(Wtext, opts->offset,0,0, 0, LINES-1, COLS);  
+	                break;
             }
         }  
           
         getch();
-        //cout << "COLORS" << COLORS;
+
     } 
 }
 

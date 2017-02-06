@@ -8,16 +8,28 @@
 using namespace std;
 
 #include "DNA.h"
-const int SEQLIMIT = 500; // currently i limit this here, to prevent crashs, until a better mechanism is implemented
 
-const int nSCREENS = 20; // Number of screen to store additionally to the existing screen. 
+
+
 
 
 
 struct fastqSeq{
     DNA dna;
     string name;
+    
     uint number; // is this the first, seocnd or third sequence of the file.
+    double tellg; // index position in the source file
+    bool inpad;
+};
+
+
+struct indexStruc{
+    uint number;
+    double tellg;
+    uint lengthName;
+    uint lengthSeq; 
+    bool inpad;
 };
 
 class fastq{
@@ -26,7 +38,8 @@ class fastq{
 
 
         //string name;    
-        list<fastqSeq> content;
+        vector<fastqSeq> content;
+        vector<indexStruc> index;
 
         
         int nOfSequences = 0;
@@ -39,8 +52,11 @@ class fastq{
         // read n terminal lines from file, manage which line was the last read one (tellg)
         fastq(const char*, int lines, int cols); 
         
-        int readmore(int, int , int , int , WINDOW*);
+        int readmore(options*, int , WINDOW*);
+        void showthese(options* , int ,WINDOW*);
         
+        void buildIndex(options*);
+        void load2show(options*);
     
         
 

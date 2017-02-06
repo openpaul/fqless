@@ -1,6 +1,6 @@
 CC      =g++ 
 CXXFLAGS  =-g -std=c++11 -Wall -pedantic
-LDFLAGS =-lncurses
+LDFLAGS =-lncurses -pthread
 
 OBJ = main.o DNA.o fastq.o 
 
