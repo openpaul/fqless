@@ -273,7 +273,7 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     }
 
     opts->linesTohave = j;
-   wprintw(Wtext, "first %i and last %i  offset %i\n",  opts->firstInPad, opts->lastInPad, opts->offset);
+    wprintw(Wtext, "first %i and last %i  offset %i seq in %i\n",  opts->firstInPad, opts->lastInPad, opts->offset,  opts->lastInPad - opts->firstInPad);
     // now we know what to show, we can actually go ahead and load them.
     load2show(opts);
 }
@@ -372,7 +372,7 @@ void fastq::buildIndex(options* opts){
 			    lengthName      = line.erase(0, 1).size();
 			    number          = i;
 			    ctellg          = infile.tellg();          // remember the position of the name start
-			    ctellg          = ctellg - line.size() - 0;  // tahts why we go back the name line length
+			    ctellg          = ctellg - line.size() - 2;  // tahts why we go back the name line length
 			    i++;
 		    }else if(relPos == 1){
 			    // this should be DNA

@@ -267,22 +267,20 @@ int main(int argc, char * argv[]) {
                 case KEY_DOWN:
 	                
 	                //refresh();
-	                if( opts->offset < (opts->avaiLines - opts->textrows)){ // TODO why the 1? lets find out later 
+	                if( opts->offset < (opts->avaiLines - opts->textrows -1)){ // TODO why the 1? lets find out later 
 
         	            opts->offset++;
 	                    mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
                         pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
                         prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
                         
-                    }else{
+                    }else if(opts->lastInPad < FQ->index.size()){
                         // ok, we reached the end, load more if there is any
                          // update pad
-                       // fillPad(opts, FQ);
-                       
                        FQ->showthese(opts, 1, Wtext);
-                       opts->offset++;
+                       opts->offset+2;
                        fillPad(opts, FQ);
-                       // 
+                        
                         mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
                         pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
                         prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
