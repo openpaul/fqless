@@ -157,7 +157,7 @@ char DNA::DNA2char(base& base){
 }
 
 
-void DNA::printColoredDNA(WINDOW* win){
+void DNA::printColoredDNA(WINDOW* win, std::pair<uint, uint> p){
     base b;
     char a;
     
@@ -171,10 +171,7 @@ void DNA::printColoredDNA(WINDOW* win){
 		if(changeColor){
 		    //printw("yes");
 		    color c;
-		    c = IntToColor(b.quality);
-		    //stringstream convert;
-		    //convert << "qul:" << b.quality << " " << c.R << " " << c.G << " " <<  c.B << "\n" ;
-
+		    c = IntToColor(b.quality, p);
 
 		    init_color(b.quality, c.R,c.G,c.B);
 		    init_pair(b.quality, b.quality, -1);
@@ -189,7 +186,7 @@ void DNA::printColoredDNA(WINDOW* win){
 
 
 
-color DNA::IntToColor(int i){
+color DNA::IntToColor(int i, std::pair<uint, uint> p){
         // these are the maximal ASCII values used for quality scores
         // we can map everything into this range
         uint max;
@@ -199,6 +196,9 @@ color DNA::IntToColor(int i){
         min     = 33;
         range   = 41;
         
+        min = p.first;
+        max = p.second;
+        range = max - min;
         
         // floor the number, so 0 is 0.
         float n;

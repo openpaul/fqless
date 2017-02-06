@@ -55,7 +55,7 @@ class DNA{
 
 		// retriving the sequence
 		string getSequence();
-	    void printColoredDNA(WINDOW*);
+	    void printColoredDNA(WINDOW*, std::pair<uint, uint> );
 
 
 
@@ -75,5 +75,5 @@ class DNA{
 //		map <char, Sdna> dnaMap = getDNAMap();	
 		//bitmap bitMap = getBitMap();
 		
-		color IntToColor(int i);
+		color IntToColor(int i, std::pair<uint, uint> );
 };

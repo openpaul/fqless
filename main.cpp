@@ -63,6 +63,9 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
     wclear(Wtext); 
     wclear(lNumb);
     
+    std::pair<uint, uint> qalpair;
+    qalpair = opts->qm.at(FQ->possibleQual[opts->qualitycode]);
+    
     // we may need to make space for a sequence that a little bit larger then 
     // the buffer and thus then we expected
 
@@ -79,11 +82,6 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
     for(auto& it: FQ->content) {
         fastqSeq& fq = it;
         
-        //if(fq.inpad == false){
-        //    //fq.inpad = false;            
-        //    j = j + 2 + ceil(fq.dna.sequence.size()/COLS) ;
-        //    continue;
-        //}
                 
         if(i > 0) wprintw(Wtext, "\n"); // spacer
         // paint the name
@@ -93,7 +91,8 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
         wprintw(Wtext, "\n");
 
         // print sequence
-        fq.dna.printColoredDNA(Wtext);
+        
+        fq.dna.printColoredDNA(Wtext, qalpair);
         wprintw(Wtext, "\n");
         //fq.inpad    = true;
         
@@ -117,7 +116,8 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
 int main(int argc, char * argv[]) {
    
     options * opts  =  new options();
-    
+
+    opts->qm   = buildQualityMap();
     opts->linenumbers = false;
     
     if(opts->linenumbers){
@@ -130,6 +130,7 @@ int main(int argc, char * argv[]) {
     opts->tellg         = 0;
     opts->firstInPad    = 0;
     opts->lastInPad     = -1;
+    opts->qualitycode   = 0;
 
     
     
@@ -278,6 +279,16 @@ int main(int argc, char * argv[]) {
                         
 
                      
+	                break;
+	            case KEY_RIGHT:
+	                opts->qualitycode++;
+	                if(opts->qualitycode > FQ->possibleQual.size() - 1){
+	                    opts->qualitycode = 0;
+	                }
+	                fillPad(opts, FQ);
+	                mvwprintw(Wcmd, 0,0, "Changed quality to %s (%i of %i poss)", FQ->possibleQual[opts->qualitycode], opts->qualitycode, FQ->possibleQual.size());
+                    pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
+                    prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
 	                break;
 
                 case KEY_NPAGE:

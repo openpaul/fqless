@@ -57,13 +57,16 @@ class fastq{
         
         void buildIndex(options*);
         void load2show(options*);
+        
+        // posible quality values
+        vector<string> possibleQual;
     
         
 
 	private:
 	    uint currentSequence = 0; // keep track of which sequence is currently open, read, printed
 		void setDNAline(fastqSeq& b, string&); 
-		void addQualityData(fastqSeq& b, string&);
+		void addQualityData(fastqSeq& b, string&, options*);
 		
 		string quality = "sanger"; // encoding of the file quality string etc.
 		                           // may be  sanger, solexa, illumina1.3, illumina1.5 illumina1.8 
@@ -73,6 +76,14 @@ class fastq{
         const char* file;
         bool isFastq;
         bool isFasta;
+        
+        // hold the min and the max quality values observed
+        int minQal =  100000;
+        int maxQal = -100000;
+        
+
+        
+        
         
 
 };

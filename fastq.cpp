@@ -6,12 +6,8 @@
 fastq::fastq(const char* inPath){
 
     string line; 
-    isFastq     = false;
-    isFasta     = false;
+    isFastq     = true;
     file        = inPath;
-
-    // determine the amount of seq in the file
-    //countSequences(inPath);
 
     return;
 }
@@ -71,7 +67,7 @@ void fastq::load2show(options* opts){
 	            b.number        = number;
 	            b.inpad         = true;
 	            setDNAline(b, dnaseq);
-	            addQualityData(b,qualseq);
+	            addQualityData(b,qualseq, opts);
 	            
 
 	            // now save it
@@ -153,7 +149,7 @@ int fastq::readmore(options* opts, int dir, WINDOW* Wtext){
 	            b.tellg         = ctellg;
 	            b.inpad         = false;
 	            setDNAline(b, dnaseq);
-	            addQualityData(b,qualseq);
+	            addQualityData(b,qualseq, opts);
 	            
 	            // update the bfull variable
 	            bfull = bfull + 2 + ceil((float)b.dna.sequence.size()/(float)opts->textcols) ;
@@ -219,21 +215,9 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
         indexStruc& ind = it;
         lines = 2 + ceil((float)ind.lengthName/(float)opts->textcols) ;
         linevec.push_back(lines);
-     //   if(ind.inpad and firstSeq == -1){
-       //     firstSeq = i;
-       // }
-       // if(ind.inpad){
-       //     lastSeq = i;
-       // }
-        // reset inpad values, we set them later again
-        //ind.inpad = false;
-        //i++;
     }
     
-    //if(firstSeq == -1){firstSeq = 0;}
-    //if(lastSeq == -1){lastSeq = -0;}
-    //wprintw(Wtext, "first %i and last %i \n",  firstSeq, lastSeq);
-    //if(firstSeq == -1){firstSeq = -0;}
+ 
     
     // ok, indexing is done, now lets find out what to show
     int linesBelowAndUp = round(opts->avaiLines/2);
@@ -255,7 +239,7 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
         j = j + linevec[i];
         i--;
     }
-    //wprintw(Wtext, "i %i and j %i \n",  i, j);
+
     // set offset to match the new pad value
     opts->offset = j;
     if(dir == 1){
@@ -264,14 +248,11 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     if(opts->offset < 0) opts->offset = 0;
 
     // now we move down find the last entry in the pad
-    
-    //vector<uint> pos2load;
     if(i < 0){ i = 0;}
     opts->firstInPad = i;
     
     j = 0;
     while(j < opts->avaiLines && i < index.size()){
-        //pos2load.push_back(i);
         j = j + linevec[i];
         i++;
         opts->lastInPad = i;
@@ -279,20 +260,20 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     
 
     opts->linesTohave = j;
-    wprintw(Wtext, "first %i and last %i  offset %i seq in %i\n",  opts->firstInPad, opts->lastInPad, opts->offset,  opts->lastInPad - opts->firstInPad);
+    //wprintw(Wtext, "first %i and last %i  offset %i seq in %i\n",  opts->firstInPad, opts->lastInPad, opts->offset,  opts->lastInPad - opts->firstInPad);
     // now we know what to show, we can actually go ahead and load them.
     load2show(opts);
 }
 
 
 
-
+/*
 void fastq::countSequences(const char* inPath){
-    /*
-        this function actulaly opens the file and has a look at it
-        it can decide if the file is fasta or fastq
-        also it counts the number of sequences stored in the file
-    */
+    
+       // this function actulaly opens the file and has a look at it
+       // it can decide if the file is fasta or fastq
+       // also it counts the number of sequences stored in the file
+    
     string line; 
 
 	if(inPath == NULL){
@@ -321,7 +302,7 @@ void fastq::countSequences(const char* inPath){
     }
     infile.close();
     return;
-}
+}*/
 
 
 
@@ -425,6 +406,27 @@ void fastq::setDNAline(fastqSeq& b, string& sDNA){
 	b.dna.append(sDNA);
 }
 
-void fastq::addQualityData(fastqSeq& b, string& qual){
-	b.dna.addQuality(qual);   
+void fastq::addQualityData(fastqSeq& b, string& qual, options* opts){
+    b.dna.addQuality(qual);
+    
+    //estimate quality range
+    int q;
+    for(auto it = qual.begin(); it != qual.end(); ++it) {
+	    q = static_cast<int>(*it);
+	    if(q < minQal){
+	        minQal = q;
+	    }
+	    if(q > maxQal){
+	        maxQal = q;
+	    }
+	}
+	// set possible quality
+    possibleQual.clear();
+    for(auto& qv : opts->qm) {
+        if(minQal > qv.second.first && maxQal < qv.second.second){
+            //cout << qv.first << " " << minQal << " " << maxQal << std::endl ;
+            possibleQual.push_back(qv.first);
+        }
+    }
+
 }
