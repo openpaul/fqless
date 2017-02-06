@@ -3,6 +3,8 @@ fqless is intendet to be a small less-like viewer for FastQ sequencing files. Al
 
 It displays the Name and the color coded sequence. It hides the quality line from the user, as this is machine information for machines and not for human beeings.
 
+It has no problem opening many gigabytes of fastq files, as it will not load everything, but will be buffering based on an index, it builds in memory. Thus after opening a large file, you will see hig CPU usage until the index is build, but you can already see everything.
+
 fqless is released under the GPLv2 or any newer version of the GPL. It comes with no warranty. Use it as you wish.
 
 ## How to install
@@ -37,7 +39,7 @@ KISS: Keep it simple, stupid.
 - Detect encoding [todo]
 - Color code sequence [done, could be better]
 - allow switching between encodings [todo]
-- allos conversion
-- allow STDIN
-- write fastq, allow conversion between encodings
-- write fasta
+- allos conversion [todo]
+- allow STDIN [yeah...]
+- write fastq, allow conversion between encodings [todo]
+- write fasta [todo]
