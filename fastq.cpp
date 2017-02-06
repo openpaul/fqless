@@ -208,79 +208,72 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     
     vector<int> linevec; // hold the number of lines, each entry has
     int lines;
-    int firstSeq = -1;
-    int lastSeq  = -1;
-    int i = 0;
+    uint lineSum    = 0;
+    int firstSeq    = opts->firstInPad;
+    int lastSeq     = opts->lastInPad;
+    int i           = 0;
+    
+   
+    // build a vector holding line counts
     for(auto& it: index) {
         indexStruc& ind = it;
         lines = 2 + ceil((float)ind.lengthName/(float)opts->textcols) ;
         linevec.push_back(lines);
-        if(ind.inpad and firstSeq == -1){
-            firstSeq = i;
-        }
-        if(ind.inpad){
-            lastSeq = i;
-        }
+     //   if(ind.inpad and firstSeq == -1){
+       //     firstSeq = i;
+       // }
+       // if(ind.inpad){
+       //     lastSeq = i;
+       // }
         // reset inpad values, we set them later again
-        ind.inpad = false;
-        i++;
+        //ind.inpad = false;
+        //i++;
     }
-    if(firstSeq == -1){firstSeq = 0;}
-    if(lastSeq == -1){lastSeq = -0;}
+    
+    //if(firstSeq == -1){firstSeq = 0;}
+    //if(lastSeq == -1){lastSeq = -0;}
     //wprintw(Wtext, "first %i and last %i \n",  firstSeq, lastSeq);
-    if(firstSeq == -1){firstSeq = -0;}
+    //if(firstSeq == -1){firstSeq = -0;}
     
     // ok, indexing is done, now lets find out what to show
     int linesBelowAndUp = round(opts->avaiLines/2);
 
     
-    // find the upper mark
+    // scroll N lines up in both cases
     uint j = 0;
-    
-    if(dir == 0){
-        i = firstSeq;
+    if(dir == 1){
+        i = lastSeq;
     }else{
-        i = lastSeq -1;
+        i = firstSeq;
     }
-   // wprintw(Wtext, "i %i and j %i \n",  i, j);
-    while(j < linesBelowAndUp && i >= 0){
-       // wprintw(Wtext, "i %i \n",  i);
+    while(j < linesBelowAndUp && i > 0){
         j = j + linevec[i];
-        // this seq we show:
-        content[i].inpad = true;
         i--;
     }
-   // wprintw(Wtext, "i %i and j %i \n",  i, j);
-    // set offset to this amount of lines
+    //wprintw(Wtext, "i %i and j %i \n",  i, j);
+    // set offset to match the new pad value
     opts->offset = j;
-    if(dir == 0){
-        //opts->offset -= opts->textrows;
-    }else{
+    if(dir == 1){
         opts->offset -= opts->textrows;
     }
     if(opts->offset < 0) opts->offset = 0;
 
-    // now we move down and mark the ones below as inpad
-    if(dir == 0){
-        i = firstSeq+1;
-    }else{
-        i = lastSeq;
-    }
+    // now we move down find the last entry in the pad
     
     //vector<uint> pos2load;
+    if(i < 0){ i = 0;}
     opts->firstInPad = i;
+    
+    j = 0;
     while(j < opts->avaiLines && i < index.size()){
-        opts->lastInPad = i;
         //pos2load.push_back(i);
         j = j + linevec[i];
         i++;
+        opts->lastInPad = i;
     }
+
     opts->linesTohave = j;
-    if(i >= index.size()){
-        //this was not enough material
-        
-    }
-    
+   wprintw(Wtext, "first %i and last %i  offset %i\n",  opts->firstInPad, opts->lastInPad, opts->offset);
     // now we know what to show, we can actually go ahead and load them.
     load2show(opts);
 }

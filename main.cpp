@@ -79,11 +79,11 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
     for(auto& it: FQ->content) {
         fastqSeq& fq = it;
         
-        if(fq.inpad == false){
-            //fq.inpad = false;            
-            j = j + 2 + ceil(fq.dna.sequence.size()/COLS) ;
-            continue;
-        }
+        //if(fq.inpad == false){
+        //    //fq.inpad = false;            
+        //    j = j + 2 + ceil(fq.dna.sequence.size()/COLS) ;
+        //    continue;
+        //}
                 
         if(i > 0) wprintw(Wtext, "\n"); // spacer
         // paint the name
@@ -118,7 +118,7 @@ int main(int argc, char * argv[]) {
    
     options * opts  =  new options();
     
-    opts->linenumbers = true;
+    opts->linenumbers = false;
     
     if(opts->linenumbers){
         opts->linenumberspace = 5;
@@ -126,8 +126,10 @@ int main(int argc, char * argv[]) {
         opts->linenumberspace = 0;
     }
  
-    opts->offset = 0;
-    opts->tellg  = 0;
+    opts->offset        = 0;
+    opts->tellg         = 0;
+    opts->firstInPad    = 0;
+    opts->lastInPad     = -1;
 
     
     
@@ -213,7 +215,7 @@ int main(int argc, char * argv[]) {
         // it should index as much as the first buffer only
         FQ->buildIndex(opts);
         FQ->showthese(opts, 1, Wtext);
-
+        opts->offset        = 0;
         // then we read the first buffer and show it
         
         
@@ -247,9 +249,14 @@ int main(int argc, char * argv[]) {
             switch(ch){
                 case KEY_UP:
 	                opts->offset--;
-	                if(opts->offset < 0) {
-	                    fillPad(opts, FQ, 0);
+
+	                if(opts->offset < 0 and opts->firstInPad > 0) {
+
+	                    FQ->showthese(opts, 0, Wtext);
+                        opts->offset--;
+	                    fillPad(opts, FQ);
 	                }
+                    if(opts->offset < 0){opts->offset = 0;} 
 	                
 
 	                mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
@@ -260,7 +267,8 @@ int main(int argc, char * argv[]) {
                 case KEY_DOWN:
 	                
 	                //refresh();
-	                if( opts->offset < (opts->avaiLines - opts->textrows) -1){ // TODO why the 1? lets find out later
+	                if( opts->offset < (opts->avaiLines - opts->textrows)){ // TODO why the 1? lets find out later 
+
         	            opts->offset++;
 	                    mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
                         pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
@@ -269,8 +277,12 @@ int main(int argc, char * argv[]) {
                     }else{
                         // ok, we reached the end, load more if there is any
                          // update pad
-                        fillPad(opts, FQ);
-                        opts->offset++;
+                       // fillPad(opts, FQ);
+                       
+                       FQ->showthese(opts, 1, Wtext);
+                       opts->offset++;
+                       fillPad(opts, FQ);
+                       // 
                         mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
                         pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
                         prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
