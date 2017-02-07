@@ -13,9 +13,24 @@ fqless is released under the GPLv2 or any newer version of the GPL. It comes wit
 ```
 git clone ...
 cd fqless
+./configure
 make
-make install
+sudo make install
 ```
+
+To uninstall just
+```
+sudo make uninstall
+```
+
+If you need or want to build your own Makefile run:
+```
+aclocal
+autoconf
+automake --add-missing
+```
+
+
 
 ### On Windows:
 Install UNIX then GOTO UNIX. 
