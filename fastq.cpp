@@ -204,7 +204,6 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     
     vector<int> linevec; // hold the number of lines, each entry has
     int lines;
-    uint lineSum    = 0;
     int firstSeq    = opts->firstInPad;
     int lastSeq     = opts->lastInPad;
     int i           = 0;
@@ -229,7 +228,7 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
 
     
     // scroll N lines up in both cases
-    uint j = 0;
+    int j = 0;
     if(dir == 1){
         i = lastSeq;
     }else{
@@ -252,7 +251,7 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     opts->firstInPad = i;
     
     j = 0;
-    while(j < opts->avaiLines && i < index.size()){
+    while(j < (int)opts->avaiLines && i < (int)index.size()){
         j = j + linevec[i];
         i++;
         opts->lastInPad = i;

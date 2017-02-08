@@ -179,11 +179,12 @@ int main(int argc, char * argv[]) {
         {0,0,0,0},
     };
 
+    int option_index = 0;
 
     //turn off getopt error message
     opterr=0; 
 
-    while((c = getopt_long(argc, argv, ":hvi:W;", longopts, NULL)) != -1){ 
+    while((c = getopt_long (argc, argv, ":hvi:W",  longopts, &option_index)) != -1){ 
         switch (c) {
         case 'i':
             input = optarg;
@@ -294,11 +295,11 @@ int main(int argc, char * argv[]) {
                 case KEY_DOWN:
 	                opts->offset++;
 
-	                if( opts->offset > (opts->avaiLines - opts->textrows -2) && (opts->lastInPad < FQ->index.size())){
+	                if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows -2) && ((int)  opts->lastInPad < (int) FQ->index.size())){
 	                    FQ->showthese(opts, 1, Wtext);
 	                    fillPad(opts, FQ);
 	                }
-	                if(opts->offset > (opts->avaiLines - opts->textrows - 1)){
+	                if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
 	                    opts->offset = opts->avaiLines - opts->textrows -1;
 	                }
 	                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
@@ -309,7 +310,7 @@ int main(int argc, char * argv[]) {
 	                break;
 	            case KEY_RIGHT:
 	                opts->qualitycode++;
-	                if(opts->qualitycode > FQ->possibleQual.size() - 1){
+	                if(opts->qualitycode > (int)FQ->possibleQual.size() - 1){
 	                    opts->qualitycode = 0;
 	                }
 	                // colors changed
