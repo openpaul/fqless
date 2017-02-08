@@ -19,7 +19,7 @@ WINDOW * lNumb;
 
 
 
-int buffersize = 50;
+int buffersize = 10;
 
 void quit(){
     //delwin(Wtext);
@@ -135,24 +135,24 @@ int main(int argc, char * argv[]) {
     
     
      // lets define options and defaults
-    char* input;
-    int showVersion,showHelp, c, ch;
+    char* input         = NULL;
+    int c, ch;
+    bool showHelp       = false;
+    bool showVersion    = false;
     string outputDir;
 
-    
+
     const struct option longopts[] =
     {
-        {"version",   no_argument,        0, 'v'},
-        {"help",      no_argument,        0, 'h'},
+        {"version",   no_argument,        false, 'v'},
+        {"help",      no_argument,        false, 'h'},
         {"input",     required_argument,  NULL, 'i'},
         {0,0,0,0},
     };
 
-    //int index;
-    //int iarg=0;
 
     //turn off getopt error message
-    opterr=1; 
+    opterr=0; 
 
     while((c = getopt_long(argc, argv, ":hvi:W;", longopts, NULL)) != -1){ 
         switch (c) {
@@ -160,9 +160,9 @@ int main(int argc, char * argv[]) {
             input = optarg;
             break;
         case 'h':
-            showHelp = 1;
+            showHelp = true;
         case 'v':
-            showVersion = 1;
+            showVersion = true;
         case 0:     
             break;
         case 1:
@@ -177,15 +177,15 @@ int main(int argc, char * argv[]) {
             break;
         }
     }
-
+    if(showHelp){
+        cout << "is here help?";
+    }
     
-    if(showHelp == 1){
-       // quit();
+    if(showHelp){
         showTheHelp();
         exit(0);
     }
-    if(showVersion == 1){
-       // quit();
+    if(showVersion){
         showTheVersion();
         exit(0);
     }
@@ -230,8 +230,8 @@ int main(int argc, char * argv[]) {
         
         
         refresh();
-        prefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
-        prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+        pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
+        //pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
         wrefresh(Wcmd);
         
         
@@ -260,7 +260,7 @@ int main(int argc, char * argv[]) {
 	                
 	                mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
 	                pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
-                    prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+                    //pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
 	                break;
 
                 case KEY_DOWN:
@@ -275,7 +275,7 @@ int main(int argc, char * argv[]) {
 	                }
 	                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
                         pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
-                        prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+                        //pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
                         
 
                      
@@ -288,7 +288,17 @@ int main(int argc, char * argv[]) {
 	                fillPad(opts, FQ);
 	                mvwprintw(Wcmd, 0,0, "Changed quality to %s (%i of %i poss)", FQ->possibleQual[opts->qualitycode], opts->qualitycode, FQ->possibleQual.size());
                     pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
-                    prefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+                    pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+	                break;
+	            case KEY_LEFT:
+	                opts->qualitycode--;
+	                if(opts->qualitycode < 0){
+	                    opts->qualitycode = FQ->possibleQual.size();
+	                }
+	                fillPad(opts, FQ);
+	                mvwprintw(Wcmd, 0,0, "Changed quality to %s (%i of %i poss)", FQ->possibleQual[opts->qualitycode], opts->qualitycode, FQ->possibleQual.size());
+                    pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
+                    //pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
 	                break;
 
                 case KEY_NPAGE:
@@ -310,7 +320,7 @@ int main(int argc, char * argv[]) {
             }
         }  
           
-        getch();
+        //getch();
 
     } 
 }

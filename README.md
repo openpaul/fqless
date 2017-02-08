@@ -35,7 +35,7 @@ automake --add-missing
 ### On Windows:
 Install UNIX then GOTO UNIX. 
 
-Serioulsy: I dont have access to a Windows PC and no interest in porting this to windows. If you want to make a pull request with a working source.
+Serioulsy: I dont have access to a Windows PC and no interest in porting this to windows. If you want to make a pull request with a working patch, feel free to do so.
 
 
 ## What it does
