@@ -36,6 +36,58 @@ void showTheVersion(){
     cout << version << std::endl;
 }
 
+
+
+color IntToColor(int i, std::pair<uint, uint> p){
+        // these are the maximal ASCII values used for quality scores
+        // we can map everything into this range
+        uint max;
+        uint min;
+        float range;
+        max     = 126;
+        min     = 33;
+        range   = 41;
+        
+        min = p.first;
+        max = p.second;
+        range = max - min;
+        
+        // floor the number, so 0 is 0.
+        float n;
+        n       = i - min;
+        n       /= range;
+        max     = max - min;
+        
+       
+        color result;
+        float m  = 1;
+        uint scale = 1000;
+        result.R = floor(( (1 - n) * m ) * scale);
+        result.G = floor(( n * m )* scale);
+        result.B = 0;
+        
+        if(result.R > scale){ result.R = scale;}
+        if(result.G > scale){ result.G = scale;}
+        
+        //cout << n << " " << result.R << " " << result.G << "- " ;
+     
+        return result;
+    }
+    
+void initTheColors(std::pair<uint, uint> p){
+    int fqmin, fqmax;
+    fqmin = p.first;
+    fqmax = p.second;
+    color c;
+    while(fqmin < fqmax){
+        
+        c = IntToColor(fqmin, p);
+        init_color(fqmin, c.R,c.G,c.B);
+        init_pair(fqmin, fqmin, -1);
+        fqmin++;
+    }
+}
+
 void winInit(options * opts){
 
     opts->textrows = LINES-2;
@@ -206,7 +258,8 @@ int main(int argc, char * argv[]) {
         atexit(quit);                   // what to do at exit
         init_pair(1, -1, -1);           // default colors, white on standart background
         
-        winInit(opts);  
+        winInit(opts);
+
         noecho();             
         opts->avaiLines   = buffersize*opts->textrows;
     
@@ -217,6 +270,7 @@ int main(int argc, char * argv[]) {
         FQ->buildIndex(opts);
         FQ->showthese(opts, 1, Wtext);
         opts->offset        = 0;
+        initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
         // then we read the first buffer and show it
         
         
@@ -285,6 +339,8 @@ int main(int argc, char * argv[]) {
 	                if(opts->qualitycode > FQ->possibleQual.size() - 1){
 	                    opts->qualitycode = 0;
 	                }
+	                // colors changed
+	                initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));
 	                fillPad(opts, FQ);
 	                mvwprintw(Wcmd, 0,0, "Changed quality to %s (%i of %i poss)", FQ->possibleQual[opts->qualitycode], opts->qualitycode, FQ->possibleQual.size());
                     pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
@@ -295,6 +351,8 @@ int main(int argc, char * argv[]) {
 	                if(opts->qualitycode < 0){
 	                    opts->qualitycode = FQ->possibleQual.size();
 	                }
+	                // colors changed
+	                initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
 	                fillPad(opts, FQ);
 	                mvwprintw(Wcmd, 0,0, "Changed quality to %s (%i of %i poss)", FQ->possibleQual[opts->qualitycode], opts->qualitycode, FQ->possibleQual.size());
                     pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  

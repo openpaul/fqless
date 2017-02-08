@@ -26,22 +26,6 @@ void DNA::addQuality(string& qal){
 	}
 }
 
-/*
-string DNA::getSequence(){
-	string DNAstring;
-	uint i = 0;
-	
-	for(auto it = sequence.begin(); it != sequence.end(); it++){
-		DNAstring[i] = DNA2char(*it);
-		i++;
-	}	
-
-	return DNAstring;
-}
-*/
-
-
-
 base DNA::char2DNA(char& dnaChar){
     base b;
     b.code = dnaChar;
@@ -58,20 +42,15 @@ void DNA::printColoredDNA(WINDOW* win, std::pair<uint, uint> p){
 
 	for(auto it = sequence.begin(); it != sequence.end(); ++it) {
 		b = (*it);
-		a = b.code;//DNA2char(b);
-		
+		a = b.code;
+				
 		if(changeColor){
-		    //printw("yes");
-		    color c;
-		    c = IntToColor(b.quality, p);
-
-		    init_color(b.quality, c.R,c.G,c.B);
-		    init_pair(b.quality, b.quality, -1);
+		    
 		    wattron(win, COLOR_PAIR(b.quality));
 		    waddch(win, a);
-            wattroff(win, COLOR_PAIR(b.quality));
+            //wattroff(win, COLOR_PAIR(b.quality));
 		}else{
-		    printw("no");
+            waddch(win, a);
 		}
 	}
 }
