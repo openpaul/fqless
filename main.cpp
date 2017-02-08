@@ -19,7 +19,7 @@ WINDOW * Wcmd;
 
 
 
-int buffersize = 10;
+
 
 void quit(){
     //delwin(Wtext);
@@ -94,7 +94,7 @@ void winInit(options * opts){
     opts->textcols = COLS;
     
     Wcmd            = newwin(1, COLS, opts->textrows+1, 0);
-    Wtext           = newpad(buffersize*opts->textrows, opts->textcols);
+    Wtext           = newpad(opts->buffersize*opts->textrows, opts->textcols);
     
 
     
@@ -160,12 +160,14 @@ int main(int argc, char * argv[]) {
     opts->firstInPad    = 0;
     opts->lastInPad     = -1;
     opts->qualitycode   = 0;
+    opts->buffersize    = 100;
 
     
     
      // lets define options and defaults
     char* input         = NULL;
     int c, ch;
+
     bool showHelp       = false;
     bool showVersion    = false;
     string outputDir;
@@ -191,8 +193,10 @@ int main(int argc, char * argv[]) {
             break;
         case 'h':
             showHelp = true;
+            break;
         case 'v':
             showVersion = true;
+            break;
         case 0:     
             break;
         case 1:
@@ -239,7 +243,7 @@ int main(int argc, char * argv[]) {
         winInit(opts);
 
         noecho();             
-        opts->avaiLines   = buffersize*opts->textrows;
+        opts->avaiLines   = opts->buffersize*opts->textrows;
     
     
         fastq* FQ = new fastq(input);
@@ -273,7 +277,7 @@ int main(int argc, char * argv[]) {
 
 
         
-
+	   mvwprintw(Wcmd, 0,0, "File: %s", FQ->file);
         
         while(1) {
             ch = wgetch(Wcmd);
@@ -288,8 +292,9 @@ int main(int argc, char * argv[]) {
 	                }
                     if(opts->offset < 0){opts->offset = 0;} 
 	                
-	                mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
+
 	                pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
+	                doupdate();
 	                break;
 
                 case KEY_DOWN:
@@ -302,12 +307,11 @@ int main(int argc, char * argv[]) {
 	                if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
 	                    opts->offset = opts->avaiLines - opts->textrows -1;
 	                }
-	                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
-                        pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
-                        
-
-                     
+	                   // mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);                          
+                    doupdate();
 	                break;
+	                
 	            case KEY_RIGHT:
 	                opts->qualitycode++;
 	                if(opts->qualitycode > (int)FQ->possibleQual.size() - 1){
@@ -316,10 +320,10 @@ int main(int argc, char * argv[]) {
 	                // colors changed
 	                initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));
 	                fillPad(opts, FQ);
-	                mvwprintw(Wcmd, 0,0, "Changed quality to %s (%i of %i poss)", FQ->possibleQual[opts->qualitycode], opts->qualitycode, FQ->possibleQual.size());
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
-
+                    doupdate();
 	                break;
+	                
 	            case KEY_LEFT:
 	                opts->qualitycode--;
 	                if(opts->qualitycode < 0){
@@ -328,18 +332,37 @@ int main(int argc, char * argv[]) {
 	                // colors changed
 	                initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
 	                fillPad(opts, FQ);
-	                mvwprintw(Wcmd, 0,0, "Changed quality to %s (%i of %i poss)", FQ->possibleQual[opts->qualitycode], opts->qualitycode, FQ->possibleQual.size());
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
+                    doupdate();
 	                break;
 
                 case KEY_NPAGE:
+                    opts->offset += opts->textrows;
 
+	                if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows -2) && ((int)  opts->lastInPad < (int) FQ->index.size())){
+	                    FQ->showthese(opts, 1, Wtext);
+	                    fillPad(opts, FQ);
+	                }
+	                if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
+	                    opts->offset = opts->avaiLines - opts->textrows -1;
+	                }
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
+                    doupdate(); 
 	                break;
 
                 case KEY_PPAGE:
-	                //form_driver(form, REQ_PREV_PAGE);
-	                //set_form_page(form, --cur_page);
+                    opts->offset -= opts->textrows;
+	                if(opts->offset < 0 and opts->firstInPad > 0) {
+	                    FQ->showthese(opts, 0, Wtext);
+                        opts->offset--;
+	                    fillPad(opts, FQ);
+	                }
+                    if(opts->offset < 0){opts->offset = 0;} 
+	                
+	                pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
+	                doupdate();
 	                break;
+	                
 	            case KEY_RESIZE:
 	                
                     endwin();
@@ -349,6 +372,7 @@ int main(int argc, char * argv[]) {
                     prefresh(Wtext, opts->offset,0,0, 0, LINES-1, COLS);  
 	                break;
             }
+            
         }  
           
         //getch();

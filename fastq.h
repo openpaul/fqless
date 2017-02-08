@@ -61,7 +61,7 @@ class fastq{
         // posible quality values
         vector<string> possibleQual;
     
-        
+        const char* file;
 
 	private:
 	    uint currentSequence = 0; // keep track of which sequence is currently open, read, printed
@@ -73,9 +73,9 @@ class fastq{
 		                           // for color chemes required
         void countSequences(const char*);
         
-        const char* file;
-        bool isFastq;
-        bool isFasta;
+
+
+
         
         // hold the min and the max quality values observed
         int minQal =  100000;

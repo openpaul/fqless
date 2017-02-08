@@ -1,12 +1,7 @@
 #include "fastq.h"
 
-
-
-
 fastq::fastq(const char* inPath){
 
-    string line; 
-    isFastq     = true;
     file        = inPath;
 
     return;
@@ -16,7 +11,7 @@ fastq::fastq(const char* inPath){
 void fastq::load2show(options* opts){
     string line;
     uint relPos = 0;
-    uint i = 0;
+    uint i      = 0;
     int number;
     string name;
     string dnaseq;
@@ -257,51 +252,10 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
         opts->lastInPad = i;
     }
     
-
     opts->linesTohave = j;
-    //wprintw(Wtext, "first %i and last %i  offset %i seq in %i\n",  opts->firstInPad, opts->lastInPad, opts->offset,  opts->lastInPad - opts->firstInPad);
     // now we know what to show, we can actually go ahead and load them.
     load2show(opts);
 }
-
-
-
-/*
-void fastq::countSequences(const char* inPath){
-    
-       // this function actulaly opens the file and has a look at it
-       // it can decide if the file is fasta or fastq
-       // also it counts the number of sequences stored in the file
-    
-    string line; 
-
-	if(inPath == NULL){
-		return;
-	}
-	ifstream infile;
-	infile.open(inPath);
-       
-    int currLine = 0;
-	if(infile.is_open()){
-	    while( getline(infile, line) ){
-	         if( currLine % 4 == 0 and line.length()>0){
-	            char d;
-	            d = line.at(0);
-	             if( currLine == 0){
-	                if( d == '@'){ isFastq = TRUE; }
-	                if( d == '>'){ isFasta = TRUE; }
-	             }
-	            if( ( isFastq and d == '@' ) or( isFasta and d == '>' ) ){
-	                nOfSequences++;
-	            }
-	            
-	        }
-	        currLine++ ;
-	    }
-    }
-    infile.close();
-    return;
-}*/
 
 
 
