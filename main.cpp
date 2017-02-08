@@ -12,7 +12,7 @@ string version = "Version 0.1 Alpha";
 
 WINDOW * Wtext;
 WINDOW * Wcmd;
-WINDOW * lNumb;
+
 
 
 
@@ -91,18 +91,12 @@ void initTheColors(std::pair<uint, uint> p){
 void winInit(options * opts){
 
     opts->textrows = LINES-2;
-    if(opts->linenumbers){     
-        opts->textcols = COLS-5;
-    }else{
-        opts->textcols = COLS;
-    }
+    opts->textcols = COLS;
+    
     Wcmd            = newwin(1, COLS, opts->textrows+1, 0);
     Wtext           = newpad(buffersize*opts->textrows, opts->textcols);
     
-    // init line number pad
-    if(opts->linenumbers){
-        lNumb       = newpad(buffersize*opts->textrows, opts->linenumberspace);
-    }
+
     
     keypad(Wcmd, TRUE);
 }
@@ -113,7 +107,6 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
     
     // clean the pad now
     wclear(Wtext); 
-    wclear(lNumb);
     
     std::pair<uint, uint> qalpair;
     qalpair = opts->qm.at(FQ->possibleQual[opts->qualitycode]);
@@ -125,12 +118,10 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
     if(opts->linesTohave != opts->avaiLines){
         opts->avaiLines = opts->linesTohave;
         wresize(Wtext, opts->avaiLines+1, opts->textcols);
-        wresize(lNumb, opts->avaiLines+1, opts->linenumberspace);
     }
 
 
     int i = 0; // keep track of lines
-    int j = 1; // offset in line numbers
     for(auto& it: FQ->content) {
         fastqSeq& fq = it;
         
@@ -151,15 +142,7 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
         i = i + 2 + ceil(fq.dna.sequence.size()/COLS) ;
     }
 
-     
-
-     // set line numbers
-     for(int i = j; i <= opts->avaiLines; i++){
-        wattron(lNumb, COLOR_PAIR(1));
-        wprintw(lNumb, "%i\n", i);
-     }
-     wattroff(lNumb, COLOR_PAIR(1));
-       
+           
 }
  
 
@@ -170,13 +153,7 @@ int main(int argc, char * argv[]) {
     options * opts  =  new options();
 
     opts->qm   = buildQualityMap();
-    opts->linenumbers = false;
-    
-    if(opts->linenumbers){
-        opts->linenumberspace = 5;
-    }else{
-        opts->linenumberspace = 0;
-    }
+
  
     opts->offset        = 0;
     opts->tellg         = 0;
@@ -284,8 +261,7 @@ int main(int argc, char * argv[]) {
         
         
         refresh();
-        pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
-        //pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+        pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
         wrefresh(Wcmd);
         
         
@@ -305,7 +281,6 @@ int main(int argc, char * argv[]) {
                 case KEY_UP:
 	                opts->offset--;
 	                if(opts->offset < 0 and opts->firstInPad > 0) {
-
 	                    FQ->showthese(opts, 0, Wtext);
                         opts->offset--;
 	                    fillPad(opts, FQ);
@@ -313,8 +288,7 @@ int main(int argc, char * argv[]) {
                     if(opts->offset < 0){opts->offset = 0;} 
 	                
 	                mvwprintw(Wcmd, 0,0, "offset %i lines %i ", opts->offset, buffersize*(LINES-1));
-	                pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);
-                    //pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+	                pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
 	                break;
 
                 case KEY_DOWN:
@@ -328,8 +302,7 @@ int main(int argc, char * argv[]) {
 	                    opts->offset = opts->avaiLines - opts->textrows -1;
 	                }
 	                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
-                        pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
-                        //pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+                        pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
                         
 
                      
@@ -343,8 +316,8 @@ int main(int argc, char * argv[]) {
 	                initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));
 	                fillPad(opts, FQ);
 	                mvwprintw(Wcmd, 0,0, "Changed quality to %s (%i of %i poss)", FQ->possibleQual[opts->qualitycode], opts->qualitycode, FQ->possibleQual.size());
-                    pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
-                    pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
+
 	                break;
 	            case KEY_LEFT:
 	                opts->qualitycode--;
@@ -355,8 +328,7 @@ int main(int argc, char * argv[]) {
 	                initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
 	                fillPad(opts, FQ);
 	                mvwprintw(Wcmd, 0,0, "Changed quality to %s (%i of %i poss)", FQ->possibleQual[opts->qualitycode], opts->qualitycode, FQ->possibleQual.size());
-                    pnoutrefresh(Wtext, opts->offset,0,0, opts->linenumberspace, opts->textrows, opts->textcols);  
-                    //pnoutrefresh(lNumb, opts->offset,0,0, 0, opts->textrows, opts->linenumberspace);
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
 	                break;
 
                 case KEY_NPAGE:
