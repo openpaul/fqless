@@ -14,7 +14,7 @@ using namespace std;
 #include "options.h"
 
 
-typedef std::bitset<3> Sdna;
+typedef char Sdna;
 typedef unsigned int  uint;
 
 
