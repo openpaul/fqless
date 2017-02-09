@@ -1,25 +1,13 @@
 #include <stdio.h>
 
 
-
-
-
 //#include "DNA.h"
 #include "fastq.h"
 
 string version = "Version 0.1 Alpha";
 
-
 WINDOW * Wtext;
 WINDOW * Wcmd;
-
-
-
-
-
-
-
-
 
 void quit(){
     //delwin(Wtext);
@@ -44,32 +32,25 @@ color IntToColor(int i, std::pair<uint, uint> p){
         uint max;
         uint min;
         float range;
-        max     = 126;
-        min     = 33;
-        range   = 41;
         
         min = p.first;
         max = p.second;
         range = max - min;
         
-        // floor the number, so 0 is 0.
         float n;
         n       = i - min;
         n       /= range;
-        max     = max - min;
         
        
         color result;
-        float m  = 1;
-        uint scale = 1000;
-        result.R = floor(( (1 - n) * m ) * scale);
-        result.G = floor(( n * m )* scale);
-        result.B = 0;
+        float m     = 1;
+        uint scale  = 1000;
+        result.R    = floor(( (1 - n) * m ) * scale);
+        result.G    = floor(( n * m )* scale);
+        result.B    = 0;
         
         if(result.R > scale){ result.R = scale;}
         if(result.G > scale){ result.G = scale;}
-        
-        //cout << n << " " << result.R << " " << result.G << "- " ;
      
         return result;
     }
@@ -109,7 +90,9 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
     wclear(Wtext); 
     
     std::pair<uint, uint> qalpair;
-    qalpair = opts->qm.at(FQ->possibleQual[opts->qualitycode]);
+    if(opts->showColor){
+        qalpair = opts->qm.at(FQ->possibleQual[opts->qualitycode]);
+    }
     
     // we may need to make space for a sequence that a little bit larger then 
     // the buffer and thus then we expected
@@ -135,7 +118,7 @@ void fillPad(options* opts, fastq* FQ, int dir=1){
 
         // print sequence
         
-        fq.dna.printColoredDNA(Wtext, qalpair);
+        fq.dna.printColoredDNA(Wtext, qalpair, opts->showColor);
         wprintw(Wtext, "\n");
         //fq.inpad    = true;
         
@@ -161,22 +144,23 @@ int main(int argc, char * argv[]) {
     opts->lastInPad     = -1;
     opts->qualitycode   = 0;
     opts->buffersize    = 100;
+    opts->showColor     = true;
 
-    
+    string colorMessage = "";
     
      // lets define options and defaults
     char* input         = NULL;
     int c, ch;
 
-    bool showHelp       = false;
-    bool showVersion    = false;
+    int showHelp       = 0;
+    int showVersion    = 0;
     string outputDir;
 
 
     const struct option longopts[] =
     {
-        {"version",   no_argument,        false, 'v'},
-        {"help",      no_argument,        false, 'h'},
+        {"version",   no_argument,        0, 'v'},
+        {"help",      no_argument,        0, 'h'},
         {"input",     required_argument,  NULL, 'i'},
         {0,0,0,0},
     };
@@ -192,10 +176,10 @@ int main(int argc, char * argv[]) {
             input = optarg;
             break;
         case 'h':
-            showHelp = true;
+            showHelp = 1;
             break;
         case 'v':
-            showVersion = true;
+            showVersion = 1;
             break;
         case 0:     
             break;
@@ -244,7 +228,11 @@ int main(int argc, char * argv[]) {
 
         noecho();             
         opts->avaiLines   = opts->buffersize*opts->textrows;
-    
+        
+        // switch to black and white if we can not show color
+        if(can_change_color() == false){
+            opts->showColor = false;
+        }
     
         fastq* FQ = new fastq(input);
         // here we can build the first index
@@ -252,18 +240,22 @@ int main(int argc, char * argv[]) {
         FQ->buildIndex(opts);
         FQ->showthese(opts, 1, Wtext);
         opts->offset        = 0;
-        initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
-        // then we read the first buffer and show it
-        
-        
-        
-        // update status
-        mvwprintw(Wcmd, 0,0, "File contains %d Sequences ", FQ->nOfSequences);
+       
+        if(opts->showColor == true){
+            initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
+        }else{
+            if(can_change_color() == false){
+                colorMessage = " | no color support by the terminal";
+            }else{
+                colorMessage = " | no valid quality range found";
+            }
+        }
 
-        
+
+
+
         // update pad
         fillPad(opts, FQ);
-        
         
         refresh();
         pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
@@ -276,8 +268,8 @@ int main(int argc, char * argv[]) {
         auto indexThread = std::async(std::launch::async, &fastq::buildIndex, FQ, opts);
 
 
-        
-	   mvwprintw(Wcmd, 0,0, "File: %s", FQ->file);
+       // update status
+	   mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file,colorMessage.c_str());
         
         while(1) {
             ch = wgetch(Wcmd);
@@ -313,8 +305,11 @@ int main(int argc, char * argv[]) {
 	                break;
 	                
 	            case KEY_RIGHT:
+	                if(opts->showColor == false){
+	                    break;
+	                }
 	                opts->qualitycode++;
-	                if(opts->qualitycode > (int)FQ->possibleQual.size() - 1){
+	                if(opts->qualitycode > (int)FQ->possibleQual.size() -1 ){
 	                    opts->qualitycode = 0;
 	                }
 	                // colors changed
@@ -325,9 +320,12 @@ int main(int argc, char * argv[]) {
 	                break;
 	                
 	            case KEY_LEFT:
+	                if(opts->showColor == false){
+	                    break;
+	                }
 	                opts->qualitycode--;
 	                if(opts->qualitycode < 0){
-	                    opts->qualitycode = FQ->possibleQual.size();
+	                    opts->qualitycode = FQ->possibleQual.size() - 1;
 	                }
 	                // colors changed
 	                initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  

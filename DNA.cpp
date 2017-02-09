@@ -33,19 +33,15 @@ base DNA::char2DNA(char& dnaChar){
 	return b;
 }
 
-void DNA::printColoredDNA(WINDOW* win, std::pair<uint, uint> p){
+void DNA::printColoredDNA(WINDOW* win, std::pair<uint, uint> p, bool changeColor){
     base b;
     char a;
-    
-    bool changeColor;
-    changeColor = can_change_color();
 
 	for(auto it = sequence.begin(); it != sequence.end(); ++it) {
 		b = (*it);
 		a = b.code;
 				
 		if(changeColor){
-		    
 		    wattron(win, COLOR_PAIR(b.quality));
 		    waddch(win, a);
             //wattroff(win, COLOR_PAIR(b.quality));

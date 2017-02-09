@@ -55,7 +55,7 @@ class DNA{
 
 		// retriving the sequence
 		string getSequence();
-	    void printColoredDNA(WINDOW*, std::pair<uint, uint> );
+	    void printColoredDNA(WINDOW*, std::pair<uint, uint>, bool );
 
 
 

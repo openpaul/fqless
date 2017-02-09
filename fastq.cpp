@@ -285,10 +285,10 @@ void fastq::buildIndex(options* opts){
             infile.seekg(opts->IndexTellg);
         }
 	
-        uint number;
-        double ctellg;
-        uint lengthName;
-        uint lengthSeq;
+        uint number         = 0;
+        double ctellg       = 0;
+        uint lengthName     = 0;
+        uint lengthSeq      = 0;
         
         
             
@@ -377,9 +377,12 @@ void fastq::addQualityData(fastqSeq& b, string& qual, options* opts){
     possibleQual.clear();
     for(auto& qv : opts->qm) {
         if(minQal > qv.second.first && maxQal < qv.second.second){
-            //cout << qv.first << " " << minQal << " " << maxQal << std::endl ;
             possibleQual.push_back(qv.first);
         }
+    }
+    // fall back to black and white mode
+    if(possibleQual.size() == 0){
+        opts->showColor = false;
     }
 
 }
