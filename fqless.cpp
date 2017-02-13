@@ -1,3 +1,6 @@
+
+#include "DNA.h"
+#include "fastq.h"
 #include "fqless.h"
 
 
@@ -105,9 +108,7 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
 
 fqless::fqless(options* opts){
 
-
-
-    if(opts->input.size() > 0){
+    if(opts->input != NULL){
 
         initscr();                      // start ncurses
         curs_set(0);                    // hide cursor
@@ -118,7 +119,7 @@ fqless::fqless(options* opts){
 
         winInit(opts);
 
-        noecho();             
+        noecho();
         opts->avaiLines   = opts->buffersize*opts->textrows;
 
         // switch to black and white if we can not show color
@@ -133,7 +134,7 @@ fqless::fqless(options* opts){
         FQ->buildIndex(opts);
         FQ->showthese(opts, 1, Wtext);
 
-        /*//
+       // /*//
           opts->offset        = 0;
 
           if(opts->showColor == true){

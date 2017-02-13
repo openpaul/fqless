@@ -18,7 +18,7 @@ static qualitymap buildQualityMap(){
 
 
 struct options{
-    string input;
+    char* input;
     
     bool linenumbers;
     int buffersize; 

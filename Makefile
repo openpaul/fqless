@@ -101,7 +101,8 @@ CONFIG_CLEAN_FILES =
 CONFIG_CLEAN_VPATH_FILES =
 am__installdirs = "$(DESTDIR)$(bindir)"
 PROGRAMS = $(bin_PROGRAMS)
-am_fqless_OBJECTS = main.$(OBJEXT) DNA.$(OBJEXT) fastq.$(OBJEXT)
+am_fqless_OBJECTS = main.$(OBJEXT) fqless.$(OBJEXT) DNA.$(OBJEXT) \
+	fastq.$(OBJEXT)
 fqless_OBJECTS = $(am_fqless_OBJECTS)
 am__DEPENDENCIES_1 =
 fqless_DEPENDENCIES = $(am__DEPENDENCIES_1)
@@ -267,7 +268,7 @@ top_build_prefix =
 top_builddir = .
 top_srcdir = .
 AUTOMAKE_OPTIONS = foreign
-fqless_SOURCES = main.cpp DNA.cpp fastq.cpp
+fqless_SOURCES = main.cpp fqless.cpp DNA.cpp fastq.cpp
 AM_CXXFLAGS = -g -std=c++11 -Wall -pedantic -O0
 fqless_LDADD = $(EXTRA_LDFLAGS)
 all: all-am
@@ -362,6 +363,7 @@ distclean-compile:
 
 include ./$(DEPDIR)/DNA.Po
 include ./$(DEPDIR)/fastq.Po
+include ./$(DEPDIR)/fqless.Po
 include ./$(DEPDIR)/main.Po
 
 .cpp.o:
