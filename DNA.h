@@ -1,5 +1,9 @@
 
+#ifndef DNA_H
+#define DNA_H
+
 #include <iostream>
+#include <stdio.h>
 #include <curses.h>
 #include <list>
 //#include <string.h>
@@ -11,6 +15,7 @@ using namespace std;
 #include <bitset>
 #include <map>
 #include <future>
+
 #include "options.h"
 
 
@@ -77,3 +82,4 @@ class DNA{
 		
 		color IntToColor(int i, std::pair<uint, uint> );
 };
+#endif

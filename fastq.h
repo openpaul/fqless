@@ -1,3 +1,7 @@
+
+#ifndef FASTQ_H
+#define FASTQ_H
+
 #include <iostream>
 #include <fstream>
 //#include <vector>
@@ -48,7 +52,7 @@ class fastq{
         int seqOnScreen;
         
         // read fastq file from disk
-        fastq(const char*);  
+        fastq(string);  
         // read n terminal lines from file, manage which line was the last read one (tellg)
         fastq(const char*, int lines, int cols); 
         
@@ -61,7 +65,7 @@ class fastq{
         // posible quality values
         vector<string> possibleQual;
     
-        const char* file;
+        string file;
 
 	private:
 	    uint currentSequence = 0; // keep track of which sequence is currently open, read, printed
@@ -87,3 +91,4 @@ class fastq{
         
 
 };
+#endif
