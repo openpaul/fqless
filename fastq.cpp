@@ -33,42 +33,52 @@ void fastq::load2show(options* opts){
     infile.seekg(index[opts->firstInPad].tellg);
     i = opts->firstInPad;
 
-    // while( i < opts->lastInPad and getline(infile, line) ){
+    while( i < opts->lastInPad and getline(infile, line) ){
 
-    //*//
-        dnaseq = line;
-
-    }else if(relPos == 3){
-
-
-        // this should quality data
-        qualseq         = line;
-
-        // now create the fastq seq and put it in the right place
-        fastqSeq b;
-
-        b.name          = name;
-        b.number        = number;
-        b.inpad         = true;
-        setDNAline(b, dnaseq);
-        addQualityData(b,qualseq, opts);
+        // each sequence of fastq
+        // fills at least two lines, name and spacer
+        // then the chars are counted and divisted by cols
 
 
-        // now save it
-        content.push_back(b);
+        if(relPos == 0){
+            // this is the name, line
+            // make new entry into content
+            name     = line.erase(0, 1);;
+            number   = i;
+        }else if(relPos == 1){
+            // this should be DNA
+            dnaseq = line;
 
+        }else if(relPos == 3){
+
+
+            // this should quality data
+            qualseq         = line;
+
+            // now create the fastq seq and put it in the right place
+            fastqSeq b;
+
+            b.name          = name;
+            b.number        = number;
+            b.inpad         = true;
+            setDNAline(b, dnaseq);
+            addQualityData(b,qualseq, opts);
+
+
+            // now save it
+            content.push_back(b);
+
+
+        }
+
+        relPos++;
+        if( relPos == 4 ){
+            // reset the relative Position counter
+            i++;
+            relPos = 0;
+        }
 
     }
-
-    relPos++;
-    if( relPos == 4 ){
-        // reset the relative Position counter
-        i++;
-        relPos = 0;
-    }
-
-    //*/  
-    // }
 
 
 }
