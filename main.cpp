@@ -53,8 +53,8 @@ int main(int argc, char * argv[]) {
     opts->qualitycode = 0;
     opts->buffersize  = 100; // must be at least 3
     opts->showColor   = true;
-    
-    
+
+
     // lets define options and defaults
     char* input         = NULL;
     int c, ch;
@@ -110,7 +110,7 @@ int main(int argc, char * argv[]) {
     if(opts->buffersize < 5){
         opts->buffersize = 5;
     }
-    
+
     if(showHelp){
         showTheHelp();
         exit(0);
