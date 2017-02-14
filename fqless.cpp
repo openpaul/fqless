@@ -1,4 +1,3 @@
-
 #include "DNA.h"
 #include "fastq.h"
 #include "fqless.h"
@@ -181,7 +180,7 @@ fqless::fqless(options* opts){
                     if(opts->offset < 0){opts->offset = 0;} 
 
 
-                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*opts->textrows, opts->avaiLines - opts->textrows -1 );
+                    //mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*opts->textrows, opts->avaiLines - opts->textrows -1 );
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
                     doupdate();
                     break;
@@ -196,7 +195,7 @@ fqless::fqless(options* opts){
                     if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
                         opts->offset = opts->avaiLines - opts->textrows -1;
                     }
-                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
+                    //mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);                          
                     doupdate();
                     break;

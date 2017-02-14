@@ -51,24 +51,26 @@ int main(int argc, char * argv[]) {
     opts->firstInPad  = 0;
     opts->lastInPad   = -1;
     opts->qualitycode = 0;
-    opts->buffersize  = 3; // must be at least 3
+    opts->buffersize  = 100; // must be at least 3
     opts->showColor   = true;
-    
-    
+
+
     // lets define options and defaults
     char* input         = NULL;
     int c, ch;
 
-    int showHelp       = 0;
-    int showVersion    = 0;
+    int showHelp    = 0;
+    int showVersion = 0;
+    int  buffer  = 0;
     string outputDir;
 
 
     const struct option longopts[] = {
         {"version",   no_argument,        0, 'v'},
         {"help",      no_argument,        0, 'h'},
+        {"buffer", required_argument,     0, 'b'},
         {"input",     required_argument,  NULL, 'i'},
-        {0,0,0,0},
+        {0,0,0,0},                          
     };
 
     int option_index = 0;
@@ -76,10 +78,13 @@ int main(int argc, char * argv[]) {
     //turn off getopt error message
     opterr=0; 
 
-    while((c = getopt_long (argc, argv, ":hvi:W",  longopts, &option_index)) != -1){ 
+    while((c = getopt_long (argc, argv, ":hvb:i:W",  longopts, &option_index)) != -1){ 
         switch (c) {
             case 'i':
                 input = optarg;
+                break;
+            case 'b':
+                opts->buffersize = atoi(optarg);
                 break;
             case 'h':
                 showHelp = 1;
@@ -101,7 +106,10 @@ int main(int argc, char * argv[]) {
                 break;
         }
     }
-
+    // minimal value for buffersieze is 5
+    if(opts->buffersize < 5){
+        opts->buffersize = 5;
+    }
 
     if(showHelp){
         showTheHelp();
@@ -109,6 +117,11 @@ int main(int argc, char * argv[]) {
     }
     if(showVersion){
         showTheVersion();
+        exit(0);
+    }
+
+    if(input == NULL){
+        cout << "No input given. See fqless -h for help." << std::endl;
         exit(0);
     }
 
