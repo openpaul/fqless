@@ -1,9 +1,9 @@
+
 #include "DNA.h"
 #include "fastq.h"
 #include "fqless.h"
-
+#include <math.h>
 #include <future>
-#include <math.h> 
 
 color fqless::IntToColor(int i, std::pair<uint, uint> p){
     // these are the maximal ASCII values used for quality scores
@@ -12,13 +12,14 @@ color fqless::IntToColor(int i, std::pair<uint, uint> p){
     uint min;
     float range;
 
-    min   = p.first;
-    max   = p.second;
+    min = p.first;
+    max = p.second;
     range = max - min;
 
     float n;
-    n         = i - min;
-    n        /= range;
+    n       = i - min;
+    n       /= range;
+
 
     color result;
     float m     = 1;
@@ -39,6 +40,7 @@ void fqless::initTheColors(std::pair<uint, uint> p){
     fqmax = p.second;
     color c;
     while(fqmin < fqmax){
+
         c = IntToColor(fqmin, p);
         init_color(fqmin, c.R,c.G,c.B);
         init_pair(fqmin, fqmin, -1);
@@ -51,8 +53,10 @@ void fqless::winInit(options * opts){
     opts->textrows = LINES-2;
     opts->textcols = COLS;
 
-    Wcmd           = newwin(1, COLS, opts->textrows+1, 0);
-    Wtext          = newpad(opts->buffersize*opts->textrows, opts->textcols);
+    Wcmd            = newwin(1, COLS, opts->textrows+1, 0);
+    Wtext           = newpad(opts->buffersize*opts->textrows, opts->textcols);
+
+
 
     keypad(Wcmd, TRUE);
 }
@@ -116,7 +120,7 @@ fqless::fqless(options* opts){
 
         winInit(opts);
 
-        noecho();
+        noecho();             
         opts->avaiLines   = opts->buffersize*opts->textrows;
 
         // switch to black and white if we can not show color
@@ -161,7 +165,7 @@ fqless::fqless(options* opts){
 
 
         // update status
-        mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file.c_str(),colorMessage.c_str());
+        mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file,colorMessage.c_str());
 
         while(1) {
             ch = wgetch(Wcmd);
@@ -264,6 +268,8 @@ fqless::fqless(options* opts){
             }
 
         }  
+
     }
     return;
 }
+
