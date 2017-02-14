@@ -1,4 +1,3 @@
-
 #include "DNA.h"
 #include "fastq.h"
 #include "fqless.h"
