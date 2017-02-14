@@ -1,8 +1,9 @@
-
 #include "DNA.h"
 #include "fastq.h"
 #include "fqless.h"
 
+#include <future>
+#include <math.h> 
 
 color fqless::IntToColor(int i, std::pair<uint, uint> p){
     // these are the maximal ASCII values used for quality scores
@@ -11,14 +12,13 @@ color fqless::IntToColor(int i, std::pair<uint, uint> p){
     uint min;
     float range;
 
-    min = p.first;
-    max = p.second;
+    min   = p.first;
+    max   = p.second;
     range = max - min;
 
     float n;
-    n       = i - min;
-    n       /= range;
-
+    n         = i - min;
+    n        /= range;
 
     color result;
     float m     = 1;
@@ -39,7 +39,6 @@ void fqless::initTheColors(std::pair<uint, uint> p){
     fqmax = p.second;
     color c;
     while(fqmin < fqmax){
-
         c = IntToColor(fqmin, p);
         init_color(fqmin, c.R,c.G,c.B);
         init_pair(fqmin, fqmin, -1);
@@ -52,10 +51,8 @@ void fqless::winInit(options * opts){
     opts->textrows = LINES-2;
     opts->textcols = COLS;
 
-    Wcmd            = newwin(1, COLS, opts->textrows+1, 0);
-    Wtext           = newpad(opts->buffersize*opts->textrows, opts->textcols);
-
-
+    Wcmd           = newwin(1, COLS, opts->textrows+1, 0);
+    Wtext          = newpad(opts->buffersize*opts->textrows, opts->textcols);
 
     keypad(Wcmd, TRUE);
 }
@@ -134,18 +131,17 @@ fqless::fqless(options* opts){
         FQ->buildIndex(opts);
         FQ->showthese(opts, 1, Wtext);
 
-       // /*//
-          opts->offset        = 0;
+        opts->offset        = 0;
 
-          if(opts->showColor == true){
-          initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
-          }else{
-          if(can_change_color() == false){
-          colorMessage = " | no color support by the terminal";
-          }else{
-          colorMessage = " | no valid quality range found";
-          }
-          }
+        if(opts->showColor == true){
+            initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
+        }else{
+            if(can_change_color() == false){
+                colorMessage = " | no color support by the terminal";
+            }else{
+                colorMessage = " | no valid quality range found";
+            }
+        }
 
 
 
@@ -165,112 +161,109 @@ fqless::fqless(options* opts){
 
 
         // update status
-        mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file,colorMessage.c_str());
+        mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file.c_str(),colorMessage.c_str());
 
         while(1) {
-        ch = wgetch(Wcmd);
+            ch = wgetch(Wcmd);
 
-        switch(ch){
-        case KEY_UP:
-        opts->offset--;
-        if(opts->offset < 0 and opts->firstInPad > 0) {
-        FQ->showthese(opts, 0, Wtext);
-        opts->offset--;
-        fillPad(opts, FQ);
-        }
-        if(opts->offset < 0){opts->offset = 0;} 
+            switch(ch){
+                case KEY_UP:
+                    opts->offset--;
+                    if(opts->offset < 0 and opts->firstInPad > 0) {
+                        FQ->showthese(opts, 0, Wtext);
+                        opts->offset--;
+                        fillPad(opts, FQ);
+                    }
+                    if(opts->offset < 0){opts->offset = 0;} 
 
 
-        pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
-        doupdate();
-        break;
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
+                    doupdate();
+                    break;
 
-        case KEY_DOWN:
-        opts->offset++;
+                case KEY_DOWN:
+                    opts->offset++;
 
-        if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows -2) && ((int)  opts->lastInPad < (int) FQ->index.size())){
-        FQ->showthese(opts, 1, Wtext);
-        fillPad(opts, FQ);
-        }
-        if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
-        opts->offset = opts->avaiLines - opts->textrows -1;
-        }
-        // mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
-        pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);                          
-        doupdate();
-        break;
+                    if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows -2) && ((int)  opts->lastInPad < (int) FQ->index.size())){
+                        FQ->showthese(opts, 1, Wtext);
+                        fillPad(opts, FQ);
+                    }
+                    if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
+                        opts->offset = opts->avaiLines - opts->textrows -1;
+                    }
+                    // mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);                          
+                    doupdate();
+                    break;
 
-        case KEY_RIGHT:
-        if(opts->showColor == false){
-        break;
-        }
-        opts->qualitycode++;
-        if(opts->qualitycode > (int)FQ->possibleQual.size() -1 ){
-            opts->qualitycode = 0;
-        }
-        // colors changed
-        initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));
-        fillPad(opts, FQ);
-        pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
-        doupdate();
-        break;
+                case KEY_RIGHT:
+                    if(opts->showColor == false){
+                        break;
+                    }
+                    opts->qualitycode++;
+                    if(opts->qualitycode > (int)FQ->possibleQual.size() -1 ){
+                        opts->qualitycode = 0;
+                    }
+                    // colors changed
+                    initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));
+                    fillPad(opts, FQ);
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
+                    doupdate();
+                    break;
 
-        case KEY_LEFT:
-        if(opts->showColor == false){
-            break;
-        }
-        opts->qualitycode--;
-        if(opts->qualitycode < 0){
-            opts->qualitycode = FQ->possibleQual.size() - 1;
-        }
-        // colors changed
-        initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
-        fillPad(opts, FQ);
-        pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
-        doupdate();
-        break;
+                case KEY_LEFT:
+                    if(opts->showColor == false){
+                        break;
+                    }
+                    opts->qualitycode--;
+                    if(opts->qualitycode < 0){
+                        opts->qualitycode = FQ->possibleQual.size() - 1;
+                    }
+                    // colors changed
+                    initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
+                    fillPad(opts, FQ);
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
+                    doupdate();
+                    break;
 
-        case KEY_NPAGE:
-        opts->offset += opts->textrows;
+                case KEY_NPAGE:
+                    opts->offset += opts->textrows;
 
-        if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows -2) && ((int)  opts->lastInPad < (int) FQ->index.size())){
-            FQ->showthese(opts, 1, Wtext);
-            fillPad(opts, FQ);
-        }
-        if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
-            opts->offset = opts->avaiLines - opts->textrows -1;
-        }
-        pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
-        doupdate(); 
-        break;
+                    if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows -2) && ((int)  opts->lastInPad < (int) FQ->index.size())){
+                        FQ->showthese(opts, 1, Wtext);
+                        fillPad(opts, FQ);
+                    }
+                    if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
+                        opts->offset = opts->avaiLines - opts->textrows -1;
+                    }
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
+                    doupdate(); 
+                    break;
 
-        case KEY_PPAGE:
-        opts->offset -= opts->textrows;
-        if(opts->offset < 0 and opts->firstInPad > 0) {
-            FQ->showthese(opts, 0, Wtext);
-            opts->offset--;
-            fillPad(opts, FQ);
-        }
-        if(opts->offset < 0){opts->offset = 0;} 
+                case KEY_PPAGE:
+                    opts->offset -= opts->textrows;
+                    if(opts->offset < 0 and opts->firstInPad > 0) {
+                        FQ->showthese(opts, 0, Wtext);
+                        opts->offset--;
+                        fillPad(opts, FQ);
+                    }
+                    if(opts->offset < 0){opts->offset = 0;} 
 
-        pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
-        doupdate();
-        break;
+                    pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
+                    doupdate();
+                    break;
 
-        case KEY_RESIZE:
+                case KEY_RESIZE:
 
-        endwin();
-        winInit(opts);
-        fillPad(opts, FQ);
-        refresh();
-        prefresh(Wtext, opts->offset,0,0, 0, LINES-1, COLS);  
-        break;
-    }
+                    endwin();
+                    winInit(opts);
+                    fillPad(opts, FQ);
+                    refresh();
+                    prefresh(Wtext, opts->offset,0,0, 0, LINES-1, COLS);  
+                    break;
+            }
 
-    }  
-    //*/
-
+        }  
     }
     return;
 }
-

@@ -1,5 +1,6 @@
 #include "DNA.h"
 
+#include <math.h> 
 
 DNA::DNA(){
 

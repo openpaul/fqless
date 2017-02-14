@@ -1,6 +1,14 @@
 
 #ifndef OPTIONS_H
 #define OPTIONS_H
+
+
+#include <string>
+#include <map>
+#include <vector>
+
+using namespace std;
+typedef unsigned int  uint;
 typedef std::map<std::string, std::pair<int, int> > qualitymap;
 
 

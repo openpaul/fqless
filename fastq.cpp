@@ -1,5 +1,6 @@
 
 #include "fastq.h"
+#include <math.h> 
 
 fastq::fastq(string inPath){
 
@@ -11,12 +12,12 @@ fastq::fastq(string inPath){
 
 void fastq::load2show(options* opts){
     string line;
-    uint relPos = 0;
-    uint i      = 0;
-    int number;
-    string name;
-    string dnaseq;
-    string qualseq;
+    uint relPos    = 0;
+    uint i         = 0;
+    int number     = 0;
+    string name    = "";
+    string dnaseq  = "";
+    string qualseq = "";
 
     // clear what we have
     content.clear();
@@ -103,11 +104,11 @@ int fastq::readmore(options* opts, int dir, WINDOW* Wtext){
             infile.seekg(opts->tellg);
         }
 
-        int number;
-        string name;
-        string dnaseq;
-        string qualseq;
-        double ctellg;
+        int number     = 0;
+        string name    = "";
+        string dnaseq  = "";
+        string qualseq = "";
+        double ctellg  = 0;
 
         while( bfull < opts->avaiLines and getline(infile, line) ){
 

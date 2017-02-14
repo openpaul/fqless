@@ -1,8 +1,21 @@
+#include <iostream>
+#include <stdio.h>
+#include <curses.h>
+#include <list>
+//#include <string.h>
+#include <stdlib.h>
+#include <math.h> 
+#include <vector>
+#include <bitset>
+#include <map>
+#include <future>
 
+using namespace std;
 
+#include "options.h"
+#include "DNA.h"
 #include "fastq.h"
 #include "fqless.h"
-#include "options.h"
 
 string version = "Version 0.1 Alpha";
 

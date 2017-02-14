@@ -1,26 +1,21 @@
-
 #ifndef DNA_H
 #define DNA_H
 
+#include "options.h"
+
 #include <iostream>
 #include <stdio.h>
-#include <curses.h>
 #include <list>
-//#include <string.h>
-#include <stdlib.h>
-#include <math.h> 
-using namespace std;
-
 #include <vector>
 #include <bitset>
 #include <map>
-#include <future>
 
-#include "options.h"
 
+
+#include <curses.h>
+using namespace std;
 
 typedef char Sdna;
-typedef unsigned int  uint;
 
 
 
