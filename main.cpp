@@ -51,7 +51,7 @@ int main(int argc, char * argv[]) {
     opts->firstInPad  = 0;
     opts->lastInPad   = -1;
     opts->qualitycode = 0;
-    opts->buffersize  = 100;
+    opts->buffersize  = 3; // must be at least 3
     opts->showColor   = true;
     
     

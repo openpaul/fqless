@@ -67,6 +67,8 @@ class fastq{
     
         string file;
 
+        int minQal =  100000;
+        int maxQal = -100000;
 	private:
 	    uint currentSequence = 0; // keep track of which sequence is currently open, read, printed
 		void setDNAline(fastqSeq& b, string&); 
@@ -81,9 +83,6 @@ class fastq{
 
 
         
-        // hold the min and the max quality values observed
-        int minQal =  100000;
-        int maxQal = -100000;
         
 
         

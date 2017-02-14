@@ -207,7 +207,10 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     // build a vector holding line counts
     for(auto& it: index) {
         indexStruc& ind = it;
-        lines = 2 + ceil((float)ind.lengthName/(float)opts->textcols) ;
+        lines = 1 + ceil((float)ind.lengthName/(float)opts->textcols) +
+        ceil((float)ind.lengthSeq/(float)opts->textcols) ;
+
+
         linevec.push_back(lines);
     }
 
@@ -229,10 +232,12 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     }else{
         i = firstSeq;
     }
+
     while(j < linesBelowAndUp && i > 0){
         j = j + linevec[i];
         i--;
     }
+
 
     // set offset to match the new pad value
     opts->offset = j;

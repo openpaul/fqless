@@ -19,6 +19,7 @@ static qualitymap buildQualityMap(){
     map["Solexa"]           = std::make_pair(59, 104);
     map["Illumina 1.3+"]    = std::make_pair(64, 104);
     map["Illumina 1.8+"]    = std::make_pair(33, 74);
+    map["none"]    = std::make_pair(32,76 );
     return map;
 }
 
