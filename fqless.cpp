@@ -165,7 +165,7 @@ fqless::fqless(options* opts){
 
 
         // update status
-        mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file,colorMessage.c_str());
+        mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file.c_str(),colorMessage.c_str());
 
         while(1) {
             ch = wgetch(Wcmd);
