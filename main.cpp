@@ -26,7 +26,15 @@ void fqless::quit(){
 }
 
 void showTheHelp(){
-    cout << "This would be the help" << std::endl;
+    cout << "fqless is a less like tool for fastq files" << std::endl;
+    cout << version << std::endl;
+    cout << "" << std::endl;
+    cout << "usage: fqless -i fastq.file" << std::endl;
+    cout << "" << std::endl;
+    cout << "Color support:" << std::endl;
+    cout << "A main feature of fqless is to hide the quality line of a fastq file" << std::endl;
+    cout << "and instead color code the DNA accordingly." << std::endl;
+    cout << "Activate color support for your terminal to use this." << std::endl;
 }
 
 
@@ -36,23 +44,17 @@ void showTheVersion(){
 
 int main(int argc, char * argv[]) {
 
-    options * opts  =  new options();
-
-    opts->qm   = buildQualityMap();
-
-
-    opts->offset        = 0;
-    opts->tellg         = 0;
-    opts->firstInPad    = 0;
-    opts->lastInPad     = -1;
-    opts->qualitycode   = 0;
-    opts->buffersize    = 100;
-    opts->showColor     = true;
-
-
-
-
-
+    options * opts    = new options();
+    opts->qm          = buildQualityMap();
+    opts->offset      = 0;
+    opts->tellg       = 0;
+    opts->firstInPad  = 0;
+    opts->lastInPad   = -1;
+    opts->qualitycode = 0;
+    opts->buffersize  = 100;
+    opts->showColor   = true;
+    
+    
     // lets define options and defaults
     char* input         = NULL;
     int c, ch;
@@ -116,7 +118,6 @@ int main(int argc, char * argv[]) {
     fqless fql = fqless(opts);
 
 
-    //getch();
 
 
 }
