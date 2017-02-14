@@ -1,4 +1,4 @@
-#fqless - FastQ Less
+# fqless - FastQ Less
 
 fqless is intendet to be a small less-like viewer for FastQ sequencing files. Allowing the user to get a quick glance at their sequecing data without the need of a heavy GUI/Java-bloatware.
 
