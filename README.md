@@ -51,10 +51,15 @@ KISS: Keep it simple, stupid.
 
 ## Features
 - Parse FastQ [done]
-- Detect encoding [todo]
-- Color code sequence [done, could be better]
-- allow switching between encodings [todo]
+- Detect encoding [done]
+- Color code sequence [done]
+- allow switching between encodings, only if multiple encodings are in question [done]
 - allos conversion [todo]
-- allow STDIN [yeah...]
+- allow STDIN [todo]
 - write fastq, allow conversion between encodings [todo]
 - write fasta [todo]
+
+# Bugs
+This software has most certainly some heavy bugs. I am testing a lot, but will propably not catch everything. So I am very glad if you submit issues. Best would be to supply a minimal working, or not worging, fastq file, that causes the problem.
+
+
