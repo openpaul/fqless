@@ -108,7 +108,7 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
 
 fqless::fqless(options* opts){
 
-    if(opts->input != NULL){
+//    if(opts->input != NULL){
 
         initscr();                      // start ncurses
         curs_set(0);                    // hide cursor
@@ -127,17 +127,16 @@ fqless::fqless(options* opts){
             opts->showColor = false;
         }
 
-        fastq* FQ = new fastq(opts->input);
-
+        fastq* FQ = new fastq();
         // here we can build the first index
         // it should index as much as the first buffer only
         FQ->buildIndex(opts);
+        
         FQ->showthese(opts, 1, Wtext);
-
         opts->offset        = 0;
-
+       
         if(opts->showColor == true){
-            initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
+            //initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
         }else{
             if(can_change_color() == false){
                 colorMessage = " | no color support by the terminal";
@@ -145,13 +144,11 @@ fqless::fqless(options* opts){
                 colorMessage = " | no valid quality range found (" + to_string(FQ->minQal) + ","  + to_string(FQ->maxQal) + ")";
             }
         }
-
-
-
+opts->showColor = false;
+                return;
 
         // update pad
         fillPad(opts, FQ);
-
         refresh();
         pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
         wrefresh(Wcmd);
@@ -269,7 +266,7 @@ fqless::fqless(options* opts){
 
         }  
 
-    }
+   // }
     return;
 }
 

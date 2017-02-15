@@ -52,7 +52,7 @@ public:
     int seqOnScreen;
 
     // read fastq file from disk
-    fastq(string);  
+    fastq();  
     // read n terminal lines from file, manage which line was the last read one (tellg)
     fastq(const char*, int lines, int cols); 
 
@@ -65,11 +65,16 @@ public:
     // posible quality values
     vector<string> possibleQual;
 
+    ifstream openFile();
     string file;
 
     int minQal =  100000;
     int maxQal = -100000;
 private:
+    
+    
+    void readIndex(options* opts, istream & inp);
+    void readContent(options* opts, istream& inp);
     uint currentSequence = 0; // keep track of which sequence is currently open, read, printed
     void setDNAline(fastqSeq& b, string&); 
     void addQualityData(fastqSeq& b, string&, options*);
