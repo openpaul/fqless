@@ -76,6 +76,7 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
     // the buffer and thus then we expected
 
     //wprintw(Wtext, "Index size %i \n",  FQ->index.size());
+    //wprintw(Wtext, "content size %i \n",  FQ->content.size());
     if(opts->linesTohave != opts->avaiLines){
         opts->avaiLines = opts->linesTohave;
         wresize(Wtext, opts->avaiLines+1, opts->textcols);
@@ -90,6 +91,7 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
         if(i > 0) wprintw(Wtext, "\n"); // spacer
         // paint the name
         wattron(Wtext, COLOR_PAIR(1));
+      //  wprintw(Wtext,"%i", i);
         wprintw(Wtext, fq.name.c_str());
         wattroff(Wtext, COLOR_PAIR(1));
         wprintw(Wtext, "\n");
@@ -135,8 +137,9 @@ fqless::fqless(options* opts){
         FQ->showthese(opts, 1, Wtext);
         opts->offset        = 0;
        
+        ///wprintw(Wtext, "%i %i %i", opts->firstInPad, opts->lastInPad, FQ->index[0].lengthName);
         if(opts->showColor == true){
-            //initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
+            initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
         }else{
             if(can_change_color() == false){
                 colorMessage = " | no color support by the terminal";
@@ -144,8 +147,6 @@ fqless::fqless(options* opts){
                 colorMessage = " | no valid quality range found (" + to_string(FQ->minQal) + ","  + to_string(FQ->maxQal) + ")";
             }
         }
-opts->showColor = false;
-                return;
 
         // update pad
         fillPad(opts, FQ);
@@ -157,11 +158,11 @@ opts->showColor = false;
         // launcyh an async thread to build an index
         // async because, we do not need this to continue 
         // but it is needed later to quickly load more data
-        auto indexThread = std::async(std::launch::async, &fastq::buildIndex, FQ, opts);
+       auto indexThread = std::async(std::launch::async, &fastq::buildIndex, FQ, opts);
 
 
         // update status
-        mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file.c_str(),colorMessage.c_str());
+        mvwprintw(Wcmd, 0,0, "File: %s%s", opts->input,colorMessage.c_str());
 
         while(1) {
             ch = wgetch(Wcmd);

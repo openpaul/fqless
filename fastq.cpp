@@ -1,6 +1,8 @@
 
 #include "fastq.h"
 #include <math.h> 
+#include <unistd.h>
+
 
 fastq::fastq(){
     return;
@@ -16,10 +18,46 @@ void fastq::load2show(options* opts){
             readContent(opts, infile);
         }
     }else{
-        readContent(opts, std::cin);
+        readContent(opts);
     }
     return;
 }
+
+void fastq::readContent(options* opts){
+  // read from buffer object
+
+    string line;
+    uint relPos    = 0;
+    uint i         = 0;
+    int number     = 0;
+    string name    = "";
+    string dnaseq  = "";
+    string qualseq = "";
+
+    // clear what we have
+    content.clear();
+
+    // open file
+    //ifstream infile;
+    //infile.open(file);
+
+    if(opts->lastInPad == 0){
+        return;
+    }
+    i = opts->firstInPad;
+
+    while( i < opts->lastInPad  ){
+
+        // each sequence of fastq
+        // fills at least two lines, name and spacer
+        // then the chars are counted and divisted by cols
+        content.push_back(buffer[i]);
+
+        i++;
+    }
+
+}
+
 
 void fastq::readContent(options* opts, istream& inp){
     string line;
@@ -284,10 +322,115 @@ void fastq::buildIndex(options* opts){
             readIndex(opts, infile);
         }
     }else{
-        readIndex(opts, std::cin);
+
+        if(index.size() == 0){
+            readExtendedIndex(opts , std::cin);
+        }else{
+          //  while(true){
+
+                usleep(100);
+                readExtendedIndex(opts , std::cin);
+           // }
+        }
     }
+    
     return;
 }
+
+
+void fastq::readExtendedIndex(options* opts, istream & inp){
+    //dir 1 down 0 up
+    string line;
+    uint bfull  = 0;
+    uint i      = index.size();
+    uint relPos = 0;
+
+
+
+    if(opts->input == NULL && index.size() != 0  ){
+        // jump down
+        // last index pos:
+        inp.seekg(opts->IndexTellg);
+    }
+
+    uint number     = 0;
+    double ctellg   = 0;
+    uint lengthName = 0;
+    uint lengthSeq  = 0;
+    string name     = "";
+    string dnaseq   = "";
+    string qualseq  = "";
+
+
+    uint linesinbuffer  = 0;
+    // calculate the lines, we have below our current view
+
+    for(uint i = opts->lastInPad; i < buffer.size(); i++) {
+        fastqSeq& fq = buffer[i];
+
+        linesinbuffer += 1 + ceil((float)fq.name.size()/(float)opts->textcols) +
+        ceil((float)fq.dna.size()/(float)opts->textcols) ;
+
+    }
+    while( linesinbuffer < 2*opts->avaiLines && getline(inp, line) ){
+
+        // fills at least two lines, name and spacer
+        // then the chars are counted and divisted by cols
+
+
+        if(relPos == 0){
+            // this is the name, line
+            // make new entry into content
+            lengthName      = line.erase(0, 1).size();
+            name            = line;
+            number          = i;
+            ctellg          = inp.tellg();          // remember the position of the name start
+            ctellg          = ctellg - line.size() - 2;  // tahts why we go back the name line length
+            i++;
+        }else if(relPos == 1){
+            // this should be DNA
+            lengthSeq = line.size();
+            dnaseq    = line;
+
+        }else if(relPos == 3){
+            qualseq = line;
+            // now create the fastq seq and put it in the right place
+            indexStruc ind;
+            fastqSeq fq;
+
+            ind.number     = number;
+            ind.lengthSeq  = lengthSeq;
+            ind.lengthName = lengthName;
+            ind.tellg      = ctellg;
+            ind.inpad      = false;
+        
+            fq.name = name;
+            setDNAline(fq, dnaseq);
+            addQualityData(fq,qualseq, opts);
+            
+     
+            index.push_back(ind);
+            buffer.push_back(fq);
+
+            
+            linesinbuffer += 1 + ceil((float)fq.name.size()/(float)opts->textcols) +
+            ceil((float)fq.dna.size()/(float)opts->textcols) ;
+
+        }
+
+        relPos++;
+        if( relPos == 4 ){
+            // reset the relative Position counter
+            relPos          = 0;
+        }
+
+    }   
+
+
+
+    return;
+}
+
 void fastq::readIndex(options* opts, istream & inp){
     //dir 1 down 0 up
     string line;
