@@ -3,6 +3,9 @@
 #include "fqless.h"
 #include <math.h>
 #include <future>
+#include <unistd.h>
+#include <pty.h>
+
 
 color fqless::IntToColor(int i, std::pair<uint, uint> p){
     // these are the maximal ASCII values used for quality scores
@@ -51,11 +54,8 @@ void fqless::winInit(options * opts){
 
     opts->textrows = LINES-2;
     opts->textcols = COLS;
-
-    Wcmd            = newwin(1, COLS, opts->textrows+1, 0);
-    Wtext           = newpad(opts->buffersize*opts->textrows, opts->textcols);
-
-
+    Wcmd           = newwin(1, COLS, opts->textrows+1, 0);
+    Wtext          = newpad(opts->buffersize*opts->textrows, opts->textcols);
 
     keypad(Wcmd, TRUE);
 }
@@ -111,7 +111,8 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
 fqless::fqless(options* opts){
 
 //    if(opts->input != NULL){
-
+         int master;
+             pid_t pid = forkpty(&master, NULL, NULL, NULL);
         initscr();                      // start ncurses
         curs_set(0);                    // hide cursor
         start_color();                  // start color mode
@@ -162,11 +163,16 @@ fqless::fqless(options* opts){
 
 
         // update status
-        mvwprintw(Wcmd, 0,0, "File: %s%s", opts->input,colorMessage.c_str());
-
+        if(opts->input == NULL){
+            mvwprintw(Wcmd, 0,0, "Read from stdin");
+        }else{
+            mvwprintw(Wcmd, 0,0, "File: %s%s", opts->input,colorMessage.c_str());
+        }
         while(1) {
+            
             ch = wgetch(Wcmd);
 
+            waddch(Wcmd,  ch);
             switch(ch){
                 case KEY_UP:
                     opts->offset--;
@@ -193,7 +199,7 @@ fqless::fqless(options* opts){
                     if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
                         opts->offset = opts->avaiLines - opts->textrows -1;
                     }
-                    //mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
+                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);                          
                     doupdate();
                     break;
@@ -267,7 +273,6 @@ fqless::fqless(options* opts){
 
         }  
 
-   // }
     return;
 }
 
