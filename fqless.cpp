@@ -61,6 +61,9 @@ void fqless::winInit(options * opts){
 }
 
 
+void fqless::quit(){
+    endwin();
+}
 
 void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
 
@@ -264,6 +267,11 @@ fqless::fqless(options* opts){
                     fillPad(opts, FQ);
                     refresh();
                     prefresh(Wtext, opts->offset,0,0, 0, LINES-1, COLS);  
+                    break;
+
+                case 'q':
+                    quit();
+                    exit(0);
                     break;
             }
 

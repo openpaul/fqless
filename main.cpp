@@ -21,9 +21,6 @@ string version = "Version 0.1 Alpha";
 
 
 
-void fqless::quit(){
-    endwin();
-}
 
 void showTheHelp(){
     cout << "fqless is a less like tool for fastq files" << std::endl;
