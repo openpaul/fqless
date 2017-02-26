@@ -11,13 +11,13 @@ color fqless::IntToColor(int i, std::pair<uint, uint> p){
     uint min;
     float range;
 
-    min = p.first;
-    max = p.second;
+    min   = p.first;
+    max   = p.second;
     range = max - min;
 
     float n;
     n       = i - min;
-    n       /= range;
+    n      /= range;
 
 
     color result;
@@ -39,10 +39,10 @@ void fqless::initTheColors(std::pair<uint, uint> p){
     fqmax = p.second;
     color c;
     while(fqmin < fqmax){
-
         c = IntToColor(fqmin, p);
         init_color(fqmin, c.R,c.G,c.B);
         init_pair(fqmin, fqmin, -1);
+        
         fqmin++;
     }
 }
