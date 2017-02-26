@@ -3,6 +3,9 @@
 #include "fqless.h"
 #include <math.h>
 #include <future>
+#include <unistd.h>
+#include <pty.h>
+
 
 color fqless::IntToColor(int i, std::pair<uint, uint> p){
     // these are the maximal ASCII values used for quality scores
@@ -51,11 +54,8 @@ void fqless::winInit(options * opts){
 
     opts->textrows = LINES-2;
     opts->textcols = COLS;
-
-    Wcmd            = newwin(1, COLS, opts->textrows+1, 0);
-    Wtext           = newpad(opts->buffersize*opts->textrows, opts->textcols);
-
-
+    Wcmd           = newwin(1, COLS, opts->textrows+1, 0);
+    Wtext          = newpad(opts->buffersize*opts->textrows, opts->textcols);
 
     keypad(Wcmd, TRUE);
 }
@@ -79,6 +79,7 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
     // the buffer and thus then we expected
 
     //wprintw(Wtext, "Index size %i \n",  FQ->index.size());
+    //wprintw(Wtext, "content size %i \n",  FQ->content.size());
     if(opts->linesTohave != opts->avaiLines){
         opts->avaiLines = opts->linesTohave;
         wresize(Wtext, opts->avaiLines+1, opts->textcols);
@@ -93,6 +94,7 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
         if(i > 0) wprintw(Wtext, "\n"); // spacer
         // paint the name
         wattron(Wtext, COLOR_PAIR(1));
+      //  wprintw(Wtext,"%i", i);
         wprintw(Wtext, fq.name.c_str());
         wattroff(Wtext, COLOR_PAIR(1));
         wprintw(Wtext, "\n");
@@ -111,8 +113,9 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
 
 fqless::fqless(options* opts){
 
-    if(opts->input != NULL){
-
+//    if(opts->input != NULL){
+         int master;
+             pid_t pid = forkpty(&master, NULL, NULL, NULL);
         initscr();                      // start ncurses
         curs_set(0);                    // hide cursor
         start_color();                  // start color mode
@@ -130,15 +133,15 @@ fqless::fqless(options* opts){
             opts->showColor = false;
         }
 
-        fastq* FQ = new fastq(opts->input);
-
+        fastq* FQ = new fastq();
         // here we can build the first index
         // it should index as much as the first buffer only
         FQ->buildIndex(opts);
+        
         FQ->showthese(opts, 1, Wtext);
-
         opts->offset        = 0;
-
+       
+        ///wprintw(Wtext, "%i %i %i", opts->firstInPad, opts->lastInPad, FQ->index[0].lengthName);
         if(opts->showColor == true){
             initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
         }else{
@@ -149,12 +152,8 @@ fqless::fqless(options* opts){
             }
         }
 
-
-
-
         // update pad
         fillPad(opts, FQ);
-
         refresh();
         pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
         wrefresh(Wcmd);
@@ -163,15 +162,20 @@ fqless::fqless(options* opts){
         // launcyh an async thread to build an index
         // async because, we do not need this to continue 
         // but it is needed later to quickly load more data
-        auto indexThread = std::async(std::launch::async, &fastq::buildIndex, FQ, opts);
+       auto indexThread = std::async(std::launch::async, &fastq::buildIndex, FQ, opts);
 
 
         // update status
-        mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file.c_str(),colorMessage.c_str());
-
+        if(opts->input == NULL){
+            mvwprintw(Wcmd, 0,0, "Read from stdin");
+        }else{
+            mvwprintw(Wcmd, 0,0, "File: %s%s", opts->input,colorMessage.c_str());
+        }
         while(1) {
+            
             ch = wgetch(Wcmd);
 
+            waddch(Wcmd,  ch);
             switch(ch){
                 case KEY_UP:
                     opts->offset--;
@@ -198,7 +202,7 @@ fqless::fqless(options* opts){
                     if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
                         opts->offset = opts->avaiLines - opts->textrows -1;
                     }
-                    //mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
+                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);                          
                     doupdate();
                     break;
@@ -277,7 +281,6 @@ fqless::fqless(options* opts){
 
         }  
 
-    }
     return;
 }
 

@@ -1,16 +1,31 @@
 
 #include "fastq.h"
 #include <math.h> 
+#include <unistd.h>
 
-fastq::fastq(string inPath){
 
-    file        = inPath;
-
+fastq::fastq(){
     return;
 }
 
 
+
 void fastq::load2show(options* opts){
+    if(opts->input != NULL){
+        ifstream infile;
+        infile.open(opts->input);
+        if(infile.is_open()){
+            readContent(opts, infile);
+        }
+    }else{
+        readContent(opts);
+    }
+    return;
+}
+
+void fastq::readContent(options* opts){
+  // read from buffer object
+
     string line;
     uint relPos    = 0;
     uint i         = 0;
@@ -23,18 +38,52 @@ void fastq::load2show(options* opts){
     content.clear();
 
     // open file
-    ifstream infile;
-    infile.open(file);
+    //ifstream infile;
+    //infile.open(file);
+
+    if(opts->lastInPad == 0){
+        return;
+    }
+    i = opts->firstInPad;
+
+    while( i < opts->lastInPad  ){
+
+        // each sequence of fastq
+        // fills at least two lines, name and spacer
+        // then the chars are counted and divisted by cols
+        content.push_back(buffer[i]);
+
+        i++;
+    }
+
+}
+
+
+void fastq::readContent(options* opts, istream& inp){
+    string line;
+    uint relPos    = 0;
+    uint i         = 0;
+    int number     = 0;
+    string name    = "";
+    string dnaseq  = "";
+    string qualseq = "";
+
+    // clear what we have
+    content.clear();
+
+    // open file
+    //ifstream infile;
+    //infile.open(file);
 
     if(opts->lastInPad == 0){
         return;
     }
 
     // jump to start of what we want to load
-    infile.seekg(index[opts->firstInPad].tellg);
+    inp.seekg(index[opts->firstInPad].tellg);
     i = opts->firstInPad;
 
-    while( i < opts->lastInPad and getline(infile, line) ){
+    while( i < opts->lastInPad and getline(inp, line) ){
 
         // each sequence of fastq
         // fills at least two lines, name and spacer
@@ -83,108 +132,108 @@ void fastq::load2show(options* opts){
 
 
 }
-
-int fastq::readmore(options* opts, int dir, WINDOW* Wtext){
-    //dir 1 down 0 up
-    string line;
-    uint bfull;
-    bfull       = 0;
-    uint i      = content.size();
-    uint relPos = 0;
-
-
-    ifstream infile;
-    infile.open(file);
+/*
+   int fastq::readmore(options* opts, int dir, WINDOW* Wtext){
+//dir 1 down 0 up
+string line;
+uint bfull;
+bfull       = 0;
+uint i      = content.size();
+uint relPos = 0;
 
 
-    if(infile.is_open() ){
-
-        if( dir == 1  ){
-            // jump down
-            infile.seekg(opts->tellg);
-        }
-
-        int number     = 0;
-        string name    = "";
-        string dnaseq  = "";
-        string qualseq = "";
-        double ctellg  = 0;
-
-        while( bfull < opts->avaiLines and getline(infile, line) ){
+ifstream infile;
+infile.open(file);
 
 
-            // each sequence of fastq
-            // fills at least two lines, name and spacer
-            // then the chars are counted and divisted by cols
+if(infile.is_open() ){
+
+if( dir == 1  ){
+// jump down
+infile.seekg(opts->tellg);
+}
+
+int number     = 0;
+string name    = "";
+string dnaseq  = "";
+string qualseq = "";
+double ctellg  = 0;
+
+while( bfull < opts->avaiLines and getline(infile, line) ){
 
 
-            if(relPos == 0){
-                // this is the name, line
-                // make new entry into content
-                name     = line.erase(0, 1);;
-                number   = i;
-                ctellg   = infile.tellg();          // remember the position of the name start
-                ctellg   = ctellg - line.length();   // tahts why we go back the name line length
-                i++;
-            }else if(relPos == 1){
-                // this should be DNA
-                dnaseq = line;
-
-            }else if(relPos == 3){
+// each sequence of fastq
+// fills at least two lines, name and spacer
+// then the chars are counted and divisted by cols
 
 
-                // this should quality data
-                qualseq         = line;
+if(relPos == 0){
+// this is the name, line
+// make new entry into content
+name     = line.erase(0, 1);;
+number   = i;
+ctellg   = infile.tellg();          // remember the position of the name start
+ctellg   = ctellg - line.length();   // tahts why we go back the name line length
+i++;
+}else if(relPos == 1){
+// this should be DNA
+dnaseq = line;
 
-                // now create the fastq seq and put it in the right place
-                fastqSeq b;
-
-                b.name          = name;
-                b.number        = number;
-                b.tellg         = ctellg;
-                b.inpad         = false;
-                setDNAline(b, dnaseq);
-                addQualityData(b,qualseq, opts);
-
-                // update the bfull variable
-                bfull = bfull + 2 + ceil((float)b.dna.sequence.size()/(float)opts->textcols) ;
-                //            name   rows of DNA              space
-
-                // now put the sequence into the content variable, so it can be accessed
-                if(dir == 1){
-                    content.push_back(b);
-                }else{
-                    // else put each sequence at a certain position 
-                    // in front of the content we already have
-                    //content.push_back(b);
-                    auto it = content.begin();
-                    advance(it, i);
-                    content.insert(it, b);
-                }
-
-            }
-
-            relPos++;
-            if( relPos == 4 ){
-                // reset the relative Position counter
-                relPos          = 0;
-            }
-
-            // save seek pointer for later readings
-            opts->tellg = infile.tellg();
-        }
+}else if(relPos == 3){
 
 
+// this should quality data
+qualseq         = line;
 
-    }
+// now create the fastq seq and put it in the right place
+fastqSeq b;
 
-    // close up
-    infile.close();
+b.name          = name;
+b.number        = number;
+b.tellg         = ctellg;
+b.inpad         = false;
+setDNAline(b, dnaseq);
+addQualityData(b,qualseq, opts);
 
-    return bfull;
+// update the bfull variable
+bfull = bfull + 2 + ceil((float)b.dna.sequence.size()/(float)opts->textcols) ;
+//            name   rows of DNA              space
+
+// now put the sequence into the content variable, so it can be accessed
+if(dir == 1){
+content.push_back(b);
+}else{
+// else put each sequence at a certain position 
+// in front of the content we already have
+//content.push_back(b);
+auto it = content.begin();
+advance(it, i);
+content.insert(it, b);
+}
+
+}
+
+relPos++;
+if( relPos == 4 ){
+    // reset the relative Position counter
+    relPos          = 0;
+}
+
+// save seek pointer for later readings
+opts->tellg = infile.tellg();
 }
 
 
+
+}
+
+// close up
+infile.close();
+
+return bfull;
+}
+
+*/
 void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     //dir 1 means down, 0 means up
 
@@ -264,7 +313,125 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
 
 
 
+
 void fastq::buildIndex(options* opts){
+    if(opts->input != NULL){
+        ifstream infile;
+        infile.open(opts->input);
+        if(infile.is_open()){
+            readIndex(opts, infile);
+        }
+    }else{
+
+        if(index.size() == 0){
+            readExtendedIndex(opts , std::cin);
+        }else{
+          //  while(true){
+
+                usleep(100);
+                readExtendedIndex(opts , std::cin);
+           // }
+        }
+    }
+    
+    return;
+}
+
+
+void fastq::readExtendedIndex(options* opts, istream & inp){
+    //dir 1 down 0 up
+    string line;
+    uint bfull  = 0;
+    uint i      = index.size();
+    uint relPos = 0;
+
+
+
+    if(opts->input == NULL && index.size() != 0  ){
+        // jump down
+        // last index pos:
+        inp.seekg(opts->IndexTellg);
+    }
+
+    uint number     = 0;
+    double ctellg   = 0;
+    uint lengthName = 0;
+    uint lengthSeq  = 0;
+    string name     = "";
+    string dnaseq   = "";
+    string qualseq  = "";
+
+
+    uint linesinbuffer  = 0;
+    // calculate the lines, we have below our current view
+
+    for(uint i = opts->lastInPad; i < buffer.size(); i++) {
+        fastqSeq& fq = buffer[i];
+
+        linesinbuffer += 1 + ceil((float)fq.name.size()/(float)opts->textcols) +
+        ceil((float)fq.dna.size()/(float)opts->textcols) ;
+
+    }
+    while( linesinbuffer < 2*opts->avaiLines && getline(inp, line) ){
+
+        // fills at least two lines, name and spacer
+        // then the chars are counted and divisted by cols
+
+
+        if(relPos == 0){
+            // this is the name, line
+            // make new entry into content
+            lengthName      = line.erase(0, 1).size();
+            name            = line;
+            number          = i;
+            ctellg          = inp.tellg();          // remember the position of the name start
+            ctellg          = ctellg - line.size() - 2;  // tahts why we go back the name line length
+            i++;
+        }else if(relPos == 1){
+            // this should be DNA
+            lengthSeq = line.size();
+            dnaseq    = line;
+
+        }else if(relPos == 3){
+            qualseq = line;
+            // now create the fastq seq and put it in the right place
+            indexStruc ind;
+            fastqSeq fq;
+
+            ind.number     = number;
+            ind.lengthSeq  = lengthSeq;
+            ind.lengthName = lengthName;
+            ind.tellg      = ctellg;
+            ind.inpad      = false;
+        
+            fq.name = name;
+            setDNAline(fq, dnaseq);
+            addQualityData(fq,qualseq, opts);
+            
+     
+            index.push_back(ind);
+            buffer.push_back(fq);
+
+            
+            linesinbuffer += 1 + ceil((float)fq.name.size()/(float)opts->textcols) +
+            ceil((float)fq.dna.size()/(float)opts->textcols) ;
+
+        }
+
+        relPos++;
+        if( relPos == 4 ){
+            // reset the relative Position counter
+            relPos          = 0;
+        }
+
+    }   
+
+
+
+    return;
+}
+
+void fastq::readIndex(options* opts, istream & inp){
     //dir 1 down 0 up
     string line;
     uint bfull  = 0;
@@ -278,82 +445,78 @@ void fastq::buildIndex(options* opts){
     }
 
 
-    ifstream infile;
-    infile.open(file);
-
-
-    if(infile.is_open() ){
-
-        if( firstIndex == false  ){
-            // jump down
-            // last index pos:
-            infile.seekg(opts->IndexTellg);
-        }
-
-        uint number         = 0;
-        double ctellg       = 0;
-        uint lengthName     = 0;
-        uint lengthSeq      = 0;
+    // ifstream infile;
+    //infile.open(file);
 
 
 
-        while( getline(infile, line) ){
-
-            if(firstIndex and bfull >= 2*opts->avaiLines ){
-                // break if we only want to index a first quick glance of the file
-                // for fast response times
-                break;
-            }
-
-
-            // each sequence of fastq
-            // fills at least two lines, name and spacer
-            // then the chars are counted and divisted by cols
-
-
-            if(relPos == 0){
-                // this is the name, line
-                // make new entry into content
-                lengthName      = line.erase(0, 1).size();
-                number          = i;
-                ctellg          = infile.tellg();          // remember the position of the name start
-                ctellg          = ctellg - line.size() - 2;  // tahts why we go back the name line length
-                i++;
-            }else if(relPos == 1){
-                // this should be DNA
-                lengthSeq = line.size();
-
-            }else if(relPos == 3){
-
-                // now create the fastq seq and put it in the right place
-                indexStruc ind;
-
-                ind.number          = number;
-                ind.lengthSeq       = lengthSeq;
-                ind.lengthName      = lengthName;
-                ind.tellg           = ctellg;     
-                ind.inpad           = false;      
-                // update the bfull variable
-                bfull = bfull + 2 + ceil((float)lengthSeq/(float)opts->textcols) ;
-                //            name   rows of DNA              space
-                index.push_back(ind);
-
-            }
-
-            relPos++;
-            if( relPos == 4 ){
-                // reset the relative Position counter
-                relPos          = 0;
-            }
-
-            // save seek pointer for later readings
-            opts->IndexTellg = infile.tellg();
-        }   
-
+    if( firstIndex == false  ){
+        // jump down
+        // last index pos:
+        inp.seekg(opts->IndexTellg);
     }
 
-    // close up
-    infile.close();
+    uint number         = 0;
+    double ctellg       = 0;
+    uint lengthName     = 0;
+    uint lengthSeq      = 0;
+
+
+
+    while( getline(inp, line) ){
+
+        if(firstIndex and bfull >= 2*opts->avaiLines ){
+            // break if we only want to index a first quick glance of the file
+            // for fast response times
+            break;
+        }
+
+
+        // each sequence of fastq
+        // fills at least two lines, name and spacer
+        // then the chars are counted and divisted by cols
+
+
+        if(relPos == 0){
+            // this is the name, line
+            // make new entry into content
+            lengthName      = line.erase(0, 1).size();
+            number          = i;
+            ctellg          = inp.tellg();          // remember the position of the name start
+            ctellg          = ctellg - line.size() - 2;  // tahts why we go back the name line length
+            i++;
+        }else if(relPos == 1){
+            // this should be DNA
+            lengthSeq = line.size();
+
+        }else if(relPos == 3){
+
+            // now create the fastq seq and put it in the right place
+            indexStruc ind;
+
+            ind.number          = number;
+            ind.lengthSeq       = lengthSeq;
+            ind.lengthName      = lengthName;
+            ind.tellg           = ctellg;     
+            ind.inpad           = false;      
+            // update the bfull variable
+            bfull = bfull + 2 + ceil((float)lengthSeq/(float)opts->textcols) ;
+            //            name   rows of DNA              space
+            index.push_back(ind);
+
+        }
+
+        relPos++;
+        if( relPos == 4 ){
+            // reset the relative Position counter
+            relPos          = 0;
+        }
+
+        // save seek pointer for later readings
+        opts->IndexTellg = inp.tellg();
+    }   
+
+
 
     return;
 }
@@ -386,7 +549,9 @@ void fastq::addQualityData(fastqSeq& b, string& qual, options* opts){
         }
     }
     // fall back to black and white mode
-    if(possibleQual.size() == 0){
+    if(possibleQual.size() > 0){
+        opts->showColor = true;
+    }else{
         opts->showColor = false;
     }
 

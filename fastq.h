@@ -44,7 +44,7 @@ public:
     //string name;    
     vector<fastqSeq> content;
     vector<indexStruc> index;
-
+    vector<fastqSeq> buffer;
 
     int nOfSequences = 0;
 
@@ -52,41 +52,40 @@ public:
     int seqOnScreen;
 
     // read fastq file from disk
-    fastq(string);  
+    fastq();  
     // read n terminal lines from file, manage which line was the last read one (tellg)
     fastq(const char*, int lines, int cols); 
 
     int readmore(options*, int , WINDOW*);
     void showthese(options* , int ,WINDOW*);
-
+    void fillbuffer(options*);
     void buildIndex(options*);
     void load2show(options*);
 
     // posible quality values
     vector<string> possibleQual;
 
+    ifstream openFile();
     string file;
 
     int minQal =  100000;
     int maxQal = -100000;
 private:
+
+    void readIndex(options* opts, istream & inp);
+    void readContent(options* opts, istream& inp);
+
+    void readContent(options* opts);
+    void readExtendedIndex(options* , istream& );
+    
     uint currentSequence = 0; // keep track of which sequence is currently open, read, printed
     void setDNAline(fastqSeq& b, string&); 
     void addQualityData(fastqSeq& b, string&, options*);
 
-    string quality = "sanger"; // encoding of the file quality string etc.
+//    string quality = "sanger"; // encoding of the file quality string etc.
     // may be  sanger, solexa, illumina1.3, illumina1.5 illumina1.8 
     // for color chemes required
     void countSequences(const char*);
-
-
-
-
-
-
-
-
-
 
 
 };

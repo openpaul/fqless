@@ -117,10 +117,10 @@ int main(int argc, char * argv[]) {
         exit(0);
     }
 
-    if(input == NULL){
+   /* if(input == NULL){
         cout << "No input given. See fqless -h for help." << std::endl;
         exit(0);
-    }
+    }*/
 
     opts->input = input;
 

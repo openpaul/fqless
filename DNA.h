@@ -48,6 +48,10 @@ public:
     DNA(vector < char >);
     DNA();
 
+    uint size(){
+        return(sequence.size());
+    };
+
     // manipulating the sequence
     void append(string&);
     void append(Tdna&);
