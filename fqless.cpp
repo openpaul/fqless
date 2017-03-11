@@ -115,7 +115,6 @@ fqless::fqless(options* opts){
 
 //    if(opts->input != NULL){
          int master;
-             pid_t pid = forkpty(&master, NULL, NULL, NULL);
         initscr();                      // start ncurses
         curs_set(0);                    // hide cursor
         start_color();                  // start color mode
@@ -133,7 +132,7 @@ fqless::fqless(options* opts){
             opts->showColor = false;
         }
 
-        fastq* FQ = new fastq();
+        fastq* FQ = new fastq(opts);
         // here we can build the first index
         // it should index as much as the first buffer only
         FQ->buildIndex(opts);
@@ -175,7 +174,6 @@ fqless::fqless(options* opts){
             
             ch = wgetch(Wcmd);
 
-            waddch(Wcmd,  ch);
             switch(ch){
                 case KEY_UP:
                     opts->offset--;
@@ -202,7 +200,7 @@ fqless::fqless(options* opts){
                     if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
                         opts->offset = opts->avaiLines - opts->textrows -1;
                     }
-                    mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
+                    //mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);                          
                     doupdate();
                     break;

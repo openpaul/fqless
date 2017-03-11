@@ -199,7 +199,7 @@ ECHO_C =
 ECHO_N = -n
 ECHO_T = 
 EXEEXT = 
-EXTRA_LDFLAGS = -lncurses -pthread
+EXTRA_LDFLAGS = -larchive -lncurses -pthread
 INSTALL = /usr/bin/install -c
 INSTALL_DATA = ${INSTALL} -m 644
 INSTALL_PROGRAM = ${INSTALL}
@@ -269,7 +269,7 @@ top_builddir = .
 top_srcdir = .
 AUTOMAKE_OPTIONS = foreign
 fqless_SOURCES = main.cpp fqless.cpp DNA.cpp fastq.cpp
-AM_CXXFLAGS = -g -std=c++11 -Wall -pedantic -O0 -lutil
+AM_CXXFLAGS = -g -std=c++11 -Wall -pedantic -O0 
 fqless_LDADD = $(EXTRA_LDFLAGS)
 all: all-am
 

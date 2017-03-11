@@ -1,10 +1,22 @@
 
 #include "fastq.h"
 #include <math.h> 
-#include <unistd.h>
+#include <iostream>
+#include <fstream>
+#include <archive.h>
+#include <archive_entry.h>
+
+bool isgz(const char * filename)
+{
+    return true;
+}
 
 
-fastq::fastq(){
+
+fastq::fastq(options* opts){
+    // find out if file is gzipped or plain text i
+    fileGZ = isgz(opts->input);
+
     return;
 }
 
@@ -12,6 +24,7 @@ fastq::fastq(){
 
 void fastq::load2show(options* opts){
     if(opts->input != NULL){
+
         ifstream infile;
         infile.open(opts->input);
         if(infile.is_open()){
@@ -24,7 +37,7 @@ void fastq::load2show(options* opts){
 }
 
 void fastq::readContent(options* opts){
-  // read from buffer object
+    // read from buffer object
 
     string line;
     uint relPos    = 0;
@@ -326,14 +339,14 @@ void fastq::buildIndex(options* opts){
         if(index.size() == 0){
             readExtendedIndex(opts , std::cin);
         }else{
-          //  while(true){
+            //  while(true){
 
-                usleep(100);
-                readExtendedIndex(opts , std::cin);
-           // }
+            usleep(100);
+            readExtendedIndex(opts , std::cin);
+            // }
         }
     }
-    
+
     return;
 }
 
@@ -403,16 +416,16 @@ void fastq::readExtendedIndex(options* opts, istream & inp){
             ind.lengthName = lengthName;
             ind.tellg      = ctellg;
             ind.inpad      = false;
-        
+
             fq.name = name;
             setDNAline(fq, dnaseq);
             addQualityData(fq,qualseq, opts);
-            
-     
+
+
             index.push_back(ind);
             buffer.push_back(fq);
 
-            
+
             linesinbuffer += 1 + ceil((float)fq.name.size()/(float)opts->textcols) +
             ceil((float)fq.dna.size()/(float)opts->textcols) ;
 

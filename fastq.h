@@ -52,7 +52,7 @@ public:
     int seqOnScreen;
 
     // read fastq file from disk
-    fastq();  
+    fastq(options *);  
     // read n terminal lines from file, manage which line was the last read one (tellg)
     fastq(const char*, int lines, int cols); 
 
@@ -70,6 +70,7 @@ public:
 
     int minQal =  100000;
     int maxQal = -100000;
+    bool fileGZ = false;
 private:
 
     void readIndex(options* opts, istream & inp);
