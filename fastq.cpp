@@ -1,7 +1,8 @@
 
 #include "fastq.h"
 #include <math.h> 
-#include <zlib.h>
+
+
 fastq::fastq(string inPath){
 
     file        = inPath;
@@ -23,15 +24,16 @@ void fastq::load2show(options* opts){
     content.clear();
 
     // open file
-    ifstream infile;
-    infile.open(opts->input);
+    gzFile infile = gzopen(opts->input, "rb");
+    //ifstream infile;
+    //infile.open(opts->input);
 
     if(opts->lastInPad == 0){
         return;
     }
 
     // jump to start of what we want to load
-    infile.seekg(index[opts->firstInPad].tellg);
+    gzseek(infile, index[opts->firstInPad].tellg, SEEK_SET);
     i = opts->firstInPad;
 
     while( i < opts->lastInPad and getline(infile, line) ){
@@ -93,15 +95,14 @@ int fastq::readmore(options* opts, int dir, WINDOW* Wtext){
     uint relPos = 0;
 
 
-    ifstream infile;
-    infile.open(file);
+    gzFile infile = gzopen(opts->input, "rb");
 
 
-    if(infile.is_open() ){
+    if(infile != NULL ){
 
         if( dir == 1  ){
             // jump down
-            infile.seekg(opts->tellg);
+            gzseek(infile,opts->tellg,SEEK_SET);
         }
 
         int number     = 0;
@@ -123,7 +124,7 @@ int fastq::readmore(options* opts, int dir, WINDOW* Wtext){
                 // make new entry into content
                 name     = line.erase(0, 1);;
                 number   = i;
-                ctellg   = infile.tellg();          // remember the position of the name start
+                ctellg   = gztell(infile);          // remember the position of the name start
                 ctellg   = ctellg - line.length();   // tahts why we go back the name line length
                 i++;
             }else if(relPos == 1){
@@ -171,7 +172,7 @@ int fastq::readmore(options* opts, int dir, WINDOW* Wtext){
             }
 
             // save seek pointer for later readings
-            opts->tellg = infile.tellg();
+            opts->tellg = gztell(infile);
         }
 
 
@@ -179,7 +180,7 @@ int fastq::readmore(options* opts, int dir, WINDOW* Wtext){
     }
 
     // close up
-    infile.close();
+    gzclose(infile);
 
     return bfull;
 }
@@ -263,6 +264,10 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
 }
 
 
+int fastq::getline(gzFile& infile, string& line){
+
+    return 0;
+}
 
 void fastq::buildIndex(options* opts){
     //dir 1 down 0 up
@@ -278,16 +283,15 @@ void fastq::buildIndex(options* opts){
     }
 
 
-    ifstream infile;
-    infile.open(file);
+    gzFile infile = gzopen(opts->input, "rb");
 
 
-    if(infile.is_open() ){
+    if(infile != NULL ){
 
         if( firstIndex == false  ){
             // jump down
             // last index pos:
-            infile.seekg(opts->IndexTellg);
+            gzseek(infile, opts->IndexTellg, SEEK_SET);
         }
 
         uint number         = 0;
@@ -316,7 +320,7 @@ void fastq::buildIndex(options* opts){
                 // make new entry into content
                 lengthName      = line.erase(0, 1).size();
                 number          = i;
-                ctellg          = infile.tellg();          // remember the position of the name start
+                ctellg          = gztell(infile);          // remember the position of the name start
                 ctellg          = ctellg - line.size() - 2;  // tahts why we go back the name line length
                 i++;
             }else if(relPos == 1){
@@ -347,13 +351,13 @@ void fastq::buildIndex(options* opts){
             }
 
             // save seek pointer for later readings
-            opts->IndexTellg = infile.tellg();
+            opts->IndexTellg = gztell(infile);
         }   
 
     }
 
     // close up
-    infile.close();
+    gzclose(infile);
 
     return;
 }

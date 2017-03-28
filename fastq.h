@@ -9,6 +9,7 @@
 #include <getopt.h> 
 #include <string> 
 #include <stdlib.h> 
+#include <zlib.h>
 using namespace std;
 
 #include "DNA.h"
@@ -82,6 +83,8 @@ private:
 
 
 
+
+    int getline(gzFile& infile, string& line);
 
 
 
