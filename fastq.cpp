@@ -1,7 +1,7 @@
 
 #include "fastq.h"
 #include <math.h> 
-
+#include <zlib.h>
 fastq::fastq(string inPath){
 
     file        = inPath;
@@ -24,7 +24,7 @@ void fastq::load2show(options* opts){
 
     // open file
     ifstream infile;
-    infile.open(file);
+    infile.open(opts->input);
 
     if(opts->lastInPad == 0){
         return;
