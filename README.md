@@ -38,7 +38,7 @@ Install UNIX then GOTO UNIX.
 
 Serioulsy: I dont have access to a Windows PC and no interest in porting this to windows. If you want to make a pull request with a working patch, feel free to do so.
 
-[a screenshot of fqless](https://gitlab.com/openpaul/fqless/blob/4c3bce633fb5779b1aab4d03ca0fc468375a78e0/fqless.png)
+[a screenshot of fqless](https://gitlab.com/openpaul/fqless/raw/4c3bce633fb5779b1aab4d03ca0fc468375a78e0/fqless.png)
 
 ## What it does
 - It opens the file, shows the sequence color coded, so one can decide if the run quality is nice and fits the expectations.
