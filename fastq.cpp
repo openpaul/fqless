@@ -2,7 +2,6 @@
 #include "fastq.h"
 #include <math.h> 
 
-
 fastq::fastq(string inPath){
 
     file        = inPath;
@@ -265,8 +264,21 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
 
 
 int fastq::getline(gzFile& infile, string& line){
-
-    return 0;
+    line = "";
+    int a;
+    char aa;
+    while(true){
+        a =  gzgetc(infile);
+        if(a == -1){
+            break;
+        }
+        aa = (char)a;
+        if(aa == '\n'){
+            break;
+        }
+        line.push_back(aa);
+    }
+    return 1;
 }
 
 void fastq::buildIndex(options* opts){

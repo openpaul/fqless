@@ -3103,7 +3103,7 @@ else
 fi
 
 
-EXTRA_LDFLAGS="-lncurses -pthread"
+EXTRA_LDFLAGS="-lncurses -lz -pthread"
 
 ac_config_files="$ac_config_files Makefile"
 
