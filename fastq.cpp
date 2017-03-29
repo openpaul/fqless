@@ -270,10 +270,10 @@ int fastq::getline(gzFile& infile, string& line){
     while(true){
         a =  gzgetc(infile);
         if(a == -1){
-            break;
+            return(0);
         }
         aa = (char)a;
-        if(aa == '\n'){
+        if(aa == '\n' or aa == '\r'){
             break;
         }
         line.push_back(aa);
