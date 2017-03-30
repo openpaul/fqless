@@ -18,7 +18,7 @@ See all options via `-h` flag.
 
 ### On UNIX:
 ```
-git clone ...
+git clone https://gitlab.com/openpaul/fqless.git
 cd fqless
 ./configure
 make
