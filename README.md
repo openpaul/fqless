@@ -47,6 +47,7 @@ Serioulsy: I dont have access to a Windows PC and no interest in porting this to
 
 - Opens the file, shows the sequence color coded, so one can decide if the run quality is nice and fits the expectations.
 It tries to guess the quality encoding of the file but you can also change that live, if it guessed the wrong one.
+- Move by arrow keys. Change quality encoding by right and left arrow.
 
 ## What it does not
 It does not allow to do anything else (no mapping, no trimming, no whatsoever).
@@ -55,7 +56,7 @@ KISS: Keep it simple, stupid.
 
 ## Features
 - Parse FastQ [done]
-- read plaint text as well as tar.gz [done]
+- read plain text as well as tar.gz [done]
 - Detect encoding [done]
 - Color code sequence [done]
 - allow switching between encodings, only if multiple encodings are in question [done]
