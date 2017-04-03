@@ -20,6 +20,9 @@ See all options via `-h` flag.
 ```
 git clone https://gitlab.com/openpaul/fqless.git
 cd fqless
+aclocal
+autoconf
+automake --add-missing
 ./configure
 make
 sudo make install
@@ -30,12 +33,6 @@ To uninstall just
 sudo make uninstall
 ```
 
-If you need or want to build your own Makefile run:
-```
-aclocal
-autoconf
-automake --add-missing
-```
 
 
 
