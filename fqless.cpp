@@ -184,12 +184,6 @@ fqless::fqless(options* opts){
 
         if(opts->showColor == true){
             initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
-        }else{
-            if(can_change_color() == false){
-                colorMessage = " | no color support by the terminal";
-            }else{
-                colorMessage = " | no valid quality range found (" + to_string(FQ->minQal) + ","  + to_string(FQ->maxQal) + ")";
-            }
         }
 
 
