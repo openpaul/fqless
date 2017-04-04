@@ -26,7 +26,7 @@ void showTheHelp(){
     cout << "fqless is a less like tool for fastq files" << std::endl;
     cout << version << std::endl;
     cout << "" << std::endl;
-    cout << "usage: fqless -i fastq.file" << std::endl;
+    cout << "usage: fqless -i fastq.file [-b 100]"  << std::endl;
     cout << "" << std::endl;
     cout << "-i, --input    path to a plaint text or tar.gz packed fastq file." << std::endl;
     cout << "-b, --buffer   integer, specifying number of screens to keep in" << std::endl;

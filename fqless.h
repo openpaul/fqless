@@ -20,6 +20,7 @@ public:
 
 private:
     void fillPad(options* opts, fastq* FQ, int dir);
+    void statusline(options* , fastq* ,WINDOW* );
 };
 
 #endif

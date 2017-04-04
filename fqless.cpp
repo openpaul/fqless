@@ -109,6 +109,44 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
 
 }
 
+void fqless::statusline(options* opts, fastq* FQ, WINDOW* Wcmd){
+    unsigned int in, ie;
+    string fname, qname, spacer;
+    fname = FQ->file.c_str();
+    if(opts->showColor == true){
+        qname = FQ->possibleQual[opts->qualitycode];
+    }else{
+        if(can_change_color() == false){
+            qname = "no color support by the terminal";
+        }else{
+            qname = "no valid quality range found (" + to_string(FQ->minQal) + ","  + to_string(FQ->maxQal) + ")";
+        }
+    }
+    
+    ie = qname.size();
+    in = fname.size();
+    
+    if(ie + in < opts->textcols){
+        spacer = std::string(opts->textcols - ie -in -1, ' ');
+    }else{
+        // shorten name;
+        int s, e;
+        s = fname.size() - (opts->textcols - ie - 4);
+        e = fname.size();
+        if(s > 0){
+            fname = "..." + fname.substr(s,e);
+        }else{
+            fname = "..."; 
+        }
+    }
+    string colorMessage;
+    werase(Wcmd);
+    mvwprintw(Wcmd, 0,0, "%s%s %s", fname.c_str(),spacer.c_str(), qname.c_str());
+
+    
+}
+
+    
 fqless::fqless(options* opts){
 
     if(opts->input != NULL){
@@ -167,7 +205,7 @@ fqless::fqless(options* opts){
 
 
         // update status
-        mvwprintw(Wcmd, 0,0, "File: %s%s", FQ->file.c_str(),colorMessage.c_str());
+        statusline(opts, FQ, Wcmd);
 
         while(1) {
             ch = wgetch(Wcmd);
@@ -211,6 +249,7 @@ fqless::fqless(options* opts){
                     if(opts->qualitycode > (int)FQ->possibleQual.size() -1 ){
                         opts->qualitycode = 0;
                     }
+                    statusline(opts, FQ, Wcmd);
                     // colors changed
                     initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));
                     fillPad(opts, FQ);
@@ -226,6 +265,7 @@ fqless::fqless(options* opts){
                     if(opts->qualitycode < 0){
                         opts->qualitycode = FQ->possibleQual.size() - 1;
                     }
+                    statusline(opts, FQ, Wcmd);
                     // colors changed
                     initTheColors(opts->qm.at(FQ->possibleQual[opts->qualitycode]));  
                     fillPad(opts, FQ);
@@ -265,6 +305,7 @@ fqless::fqless(options* opts){
                     endwin();
                     winInit(opts);
                     fillPad(opts, FQ);
+                    statusline(opts, FQ, Wcmd);
                     refresh();
                     prefresh(Wtext, opts->offset,0,0, 0, LINES-1, COLS);  
                     break;
