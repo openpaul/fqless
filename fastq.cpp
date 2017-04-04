@@ -301,9 +301,12 @@ void fastq::addQualityData(fastqSeq& b, string& qual, options* opts){
             possibleQual.push_back(qv.first);
         }
     }
-    // fall back to black and white mode
+    // in case there is no kown mode
+    // the integers still code for quality
+    // so make a new unknown coding
     if(possibleQual.size() == 0){
-        opts->showColor = false;
+        opts->qm["unknown"] = std::make_pair(minQal, maxQal);
+        possibleQual.push_back("unknown");
     }
 
 }
