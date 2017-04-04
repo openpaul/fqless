@@ -110,7 +110,7 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
 }
 
 void fqless::statusline(options* opts, fastq* FQ, WINDOW* Wcmd){
-    unsigned int in, ie;
+    int in, ie;
     string fname, qname, spacer;
     fname = FQ->file.c_str();
     if(opts->showColor == true){

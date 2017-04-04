@@ -57,11 +57,10 @@ int main(int argc, char * argv[]) {
 
     // lets define options and defaults
     char* input         = NULL;
-    int c, ch;
+    int c;
 
     int showHelp    = 0;
     int showVersion = 0;
-    int  buffer     = 0;
     string outputDir;
 
 
