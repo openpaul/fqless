@@ -297,7 +297,7 @@ void fastq::addQualityData(fastqSeq& b, string& qual, options* opts){
     // set possible quality
     possibleQual.clear();
     for(auto& qv : opts->qm) {
-        if(minQal > qv.second.first && maxQal < qv.second.second){
+        if(minQal >= qv.second.first && maxQal <= qv.second.second){
             possibleQual.push_back(qv.first);
         }
     }

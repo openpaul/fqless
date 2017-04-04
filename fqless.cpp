@@ -110,11 +110,17 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
 }
 
 void fqless::statusline(options* opts, fastq* FQ, WINDOW* Wcmd){
-    int in, ie;
+    int ia,ib,in, ie;
     string fname, qname, spacer;
     fname = FQ->file.c_str();
     if(opts->showColor == true){
+
+        ia = opts->qm.at(FQ->possibleQual[opts->qualitycode]).first;  
+        ib = opts->qm.at(FQ->possibleQual[opts->qualitycode]).second;  
         qname = FQ->possibleQual[opts->qualitycode];
+        if(qname == "unknown"){
+            qname = qname + "["+std::to_string(ia) + ":" +std::to_string(ib) +"]";
+        }
     }else{
         if(can_change_color() == false){
             qname = "no color support by the terminal";
@@ -122,7 +128,6 @@ void fqless::statusline(options* opts, fastq* FQ, WINDOW* Wcmd){
             qname = "no valid quality range found (" + to_string(FQ->minQal) + ","  + to_string(FQ->maxQal) + ")";
         }
     }
-    
     ie = qname.size();
     in = fname.size();
     
