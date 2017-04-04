@@ -1,0 +1,15 @@
+.deps
+*.o
+*.log
+*.old
+*.m4
+test*
+Makefile
+autom4te.cache/
+compile
+config.status
+depcomp
+fqless
+install-sh
+missing
+
