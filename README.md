@@ -32,6 +32,8 @@ To uninstall just
 ```
 sudo make uninstall
 ```
+#### Activate color support in your terminal
+To color code the DNA fqless uses ncurses which requires you to use a 256 color compatible terminal. Most modern terminal emulators have this build in but sometimes this needs to be activated in your `.bashrc` by inserting the line `TERM=xterm-256color`.
 
 
 
