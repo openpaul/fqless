@@ -45,7 +45,7 @@ Serioulsy: I dont have access to a Windows PC and no interest in porting this to
 
 
 ## What it does
-![a screenshot of fqless](https://gitlab.com/openpaul/fqless/raw/4c3bce633fb5779b1aab4d03ca0fc468375a78e0/fqless.png)
+![a screenshot of fqless](https://raw.githubusercontent.com/openpaul/fqless/master/fqless.png)
 
 - Opens the file, shows the sequence color coded, so one can decide if the run quality is nice and fits the expectations.
 It tries to guess the quality encoding of the file but you can also change that live, if it guessed the wrong one.
@@ -70,4 +70,6 @@ KISS: Keep it simple, stupid.
 # Bugs
 This software has most certainly some heavy bugs. I am testing a lot, but will propably not catch everything. So I am very glad if you submit issues. Best would be to supply a minimal working, or not worging, fastq file, that causes the problem.
 
+
+![asci art](https://raw.githubusercontent.com/openpaul/fqless/master/fqless_asci.png)
 
