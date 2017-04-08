@@ -1,10 +1,10 @@
 # fqless - FastQ Less
 
-fqless is intendet to be a small less-like viewer for FastQ sequencing files. Allowing the user to get a quick glance at their sequecing data without the need of a heavy GUI/Java-bloatware.
+fqless is intended to be a small less-like viewer for FastQ sequencing files. Allowing the user to get a quick glance at their sequencing data without the need of a heavy GUI/Java-bloatware.
 
-It displays the name and the color coded sequence. It hides the quality line from the user, as this is machine information for machines and not for human beeings.
+It displays the name and the color coded sequence. It hides the quality line from the user, as this is machine information for machines and not for human beings.
 
-It has no problem opening many gigabytes of fastq files, as it will not load everything, but will be buffering based on an index, it builds in memory. Thus after opening a large file, you will see hig CPU usage until the index is build, but you can already see everything.
+It has no problem opening many gigabytes of fastq files, as it will not load everything, but will be buffering based on an index, it builds in memory. Thus after opening a large file, you will see high CPU usage until the index is build, but you can already see everything.
 
 fqless is released under the GPLv2 or any newer version of the GPL. It comes with no warranty. Use it as you wish.
 
@@ -41,7 +41,7 @@ To color code the DNA fqless uses ncurses which requires you to use a 256 color 
 ### On Windows:
 Install UNIX then GOTO UNIX. 
 
-Serioulsy: I dont have access to a Windows PC and no interest in porting this to windows. If you want to make a pull request with a working patch, feel free to do so.
+Seriously: I don't have access to a Windows PC and no interest in porting this to windows. If you want to make a pull request with a working patch, feel free to do so.
 
 
 ## What it does
@@ -62,13 +62,13 @@ KISS: Keep it simple, stupid.
 - Detect encoding [done]
 - Color code sequence [done]
 - allow switching between encodings, only if multiple encodings are in question [done]
-- allos conversion [todo]
-- allow STDIN [canceld, because, who wants that?]
+- allows conversion to other encodings [maybe]
+- allow STDIN [canceled, because, who wants that?]
 - write fastq, allow conversion between encodings [todo, maybe]
 - write fasta [todo, maybe]
 
 # Bugs
-This software has most certainly some heavy bugs. I am testing a lot, but will propably not catch everything. So I am very glad if you submit issues. Best would be to supply a minimal working, or not worging, fastq file, that causes the problem.
+This software has most certainly some heavy bugs. I am testing a lot, but will probably not catch everything. So I am very glad if you submit issues. Best would be to supply a minimal working, or not worging, fastq file, that causes the problem.
 
 
 ![asci art](https://raw.githubusercontent.com/openpaul/fqless/master/fqless_asci.png)
