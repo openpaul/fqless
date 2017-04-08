@@ -10,7 +10,7 @@ fqless is released under the GPLv2 or any newer version of the GPL. It comes wit
 
 Use it via
 ```
-fqless -i file.tar.gz
+fqless file.tar.gz
 ```
 See all options via `-h` flag.
 

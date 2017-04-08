@@ -26,9 +26,8 @@ void showTheHelp(){
     cout << "fqless is a less like tool for fastq files" << std::endl;
     cout << version << std::endl;
     cout << "" << std::endl;
-    cout << "usage: fqless -i fastq.file [-b 100]"  << std::endl;
+    cout << "usage: fqless [-b 100] [filename]"  << std::endl;
     cout << "" << std::endl;
-    cout << "-i, --input    path to a plaint text or tar.gz packed fastq file." << std::endl;
     cout << "-b, --buffer   integer, specifying number of screens to keep in" << std::endl;
     cout << "               buffer for scrolling (default: 100, min: 5)" << std::endl;
     cout << "Color support:" << std::endl;
@@ -68,7 +67,6 @@ int main(int argc, char * argv[]) {
         {"version",   no_argument,        0, 'v'},
         {"help",      no_argument,        0, 'h'},
         {"buffer", required_argument,     0, 'b'},
-        {"input",     required_argument,  NULL, 'i'},
         {0,0,0,0},                          
     };
 
@@ -77,11 +75,9 @@ int main(int argc, char * argv[]) {
     //turn off getopt error message
     opterr=0; 
 
-    while((c = getopt_long (argc, argv, ":hvb:i:W",  longopts, &option_index)) != -1){ 
+
+    while((c = getopt_long (argc, argv, ":hvb:W",  longopts, &option_index)) != -1){ 
         switch (c) {
-            case 'i':
-                input = optarg;
-                break;
             case 'b':
                 opts->buffersize = atoi(optarg);
                 break;
@@ -105,6 +101,10 @@ int main(int argc, char * argv[]) {
                 break;
         }
     }
+    // inout has to be the last argument
+    input = argv[argc-1];
+
+
     // minimal value for buffersieze is 5
     if(opts->buffersize < 5){
         opts->buffersize = 5;
@@ -120,10 +120,15 @@ int main(int argc, char * argv[]) {
     }
 
     if(input == NULL){
-        cout << "No input given. See fqless -h for help." << std::endl;
+        cerr << "No input given. See fqless -h for help." << std::endl;
         exit(0);
+    }else{
+        std::ifstream infile(input);
+        if(infile.good() != true){
+            cerr << "Can not find or open file: " << input << std::endl;
+            exit(0);
+        }
     }
-
     opts->input = input;
 
     // init a new fql less class
