@@ -54,38 +54,3 @@ void DNA::printColoredDNA(WINDOW* win, std::pair<uint, uint> p, bool changeColor
 
 
 
-color DNA::IntToColor(int i, std::pair<uint, uint> p){
-    // these are the maximal ASCII values used for quality scores
-    // we can map everything into this range
-    uint max;
-    uint min;
-    float range;
-    max     = 126;
-    min     = 33;
-    range   = 41;
-
-    min = p.first;
-    max = p.second;
-    range = max - min;
-
-    // floor the number, so 0 is 0.
-    float n;
-    n       = i - min;
-    n       /= range;
-    max     = max - min;
-
-
-    color result;
-    float m  = 1;
-    uint scale = 1000;
-    result.R = floor(( (1 - n) * m ) * scale);
-    result.G = floor(( n * m )* scale);
-    result.B = 0;
-
-    if(result.R > scale){ result.R = scale;}
-    if(result.G > scale){ result.G = scale;}
-
-    //cout << n << " " << result.R << " " << result.G << "- " ;
-
-    return result;
-}
