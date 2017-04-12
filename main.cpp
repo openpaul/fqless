@@ -134,7 +134,8 @@ int main(int argc, char * argv[]) {
     // init a new fql less class
     fqless fql = fqless(opts);
 
-
+    // exit
+    exit(0);
 
 
 }
