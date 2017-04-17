@@ -18,7 +18,7 @@ See all options via `-h` flag.
 
 ### On UNIX:
 ```
-git clone https://gitlab.com/openpaul/fqless.git
+git clone https://github.com/openpaul/fqless
 cd fqless
 aclocal
 autoconf
