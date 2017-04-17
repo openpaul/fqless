@@ -4,7 +4,6 @@
 *.old
 *.m4
 test*
-Makefile
 autom4te.cache/
 compile
 config.status
