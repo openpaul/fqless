@@ -101,8 +101,10 @@ int main(int argc, char * argv[]) {
                 break;
         }
     }
-    // inout has to be the last argument
-    input = argv[argc-1];
+    // input has to be the last argument
+    if(argc > 1){
+        input = argv[argc-1];
+    }
 
 
     // minimal value for buffersieze is 5
@@ -134,7 +136,8 @@ int main(int argc, char * argv[]) {
     // init a new fql less class
     fqless fql = fqless(opts);
 
-
+    // exit
+    exit(0);
 
 
 }

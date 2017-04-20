@@ -14,18 +14,13 @@ fqless file.tar.gz
 ```
 See all options via `-h` flag.
 
-## How to install
+## How to build
 
 ### On UNIX:
 ```
-git clone https://gitlab.com/openpaul/fqless.git
+git clone https://github.com/openpaul/fqless
 cd fqless
-aclocal
-autoconf
-automake --add-missing
-./configure
 make
-sudo make install
 ```
 
 To uninstall just
