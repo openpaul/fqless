@@ -19,8 +19,11 @@ public:
 
 
 private:
+    vector<color> colors;
     void fillPad(options* opts, fastq* FQ, int dir);
     void statusline(options* , fastq* ,WINDOW* );
+    void rememberTheColors();
+    void endTheColors();
 };
 
 #endif

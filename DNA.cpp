@@ -42,10 +42,10 @@ void DNA::printColoredDNA(WINDOW* win, std::pair<uint, uint> p, bool changeColor
         b = (*it);
         a = b.code;
 
-        if(changeColor){
+        if(changeColor and b.quality > 0 and (int)b.quality < COLOR_PAIRS){
             wattron(win, COLOR_PAIR(b.quality));
             waddch(win, a);
-            //wattroff(win, COLOR_PAIR(b.quality));
+            wattroff(win, COLOR_PAIR(b.quality));
         }else{
             waddch(win, a);
         }

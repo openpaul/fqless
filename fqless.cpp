@@ -4,6 +4,28 @@
 #include <math.h>
 #include <future>
 
+/*
+void fqless::rememberTheColors(){
+    // remember all the colors
+    // the terminal has
+    colors.resize(COLOR_PAIRS);
+    for(int i = 1; i < COLOR_PAIRS; i++){
+        color_content(i, &colors[i].R, &colors[i].G, &colors[i].B);
+    }
+    
+}
+
+void fqless::endTheColors(){
+
+    color c;
+    for(int i=0; i < COLOR_PAIRS; i++){
+        c = colors[i];
+        init_color(i, c.R,c.G,c.B);
+        init_pair(i,i,-1);
+    }
+}*/
+
+
 color fqless::IntToColor(int i, std::pair<uint, uint> p){
     // these are the maximal ASCII values used for quality scores
     // we can map everything into this range
@@ -22,7 +44,7 @@ color fqless::IntToColor(int i, std::pair<uint, uint> p){
     
     color result;
     float m     = 1;
-    uint scale  = 1000;
+    int scale   = 1000;
     result.R    = floor(( (1 - n) * m ) * scale);
     result.G    = floor(( n * m )* scale);
     result.B    = 0;
@@ -38,11 +60,13 @@ void fqless::initTheColors(std::pair<uint, uint> p){
     fqmin = p.first;
     fqmax = p.second;
     color c;
-    while(fqmin <= fqmax){
 
-        c = IntToColor(fqmin, p);
-        init_color(fqmin, c.R,c.G,c.B);
-        init_pair(fqmin, fqmin, -1);
+    while(fqmin <= fqmax){
+        if(fqmin > 1 and fqmin < COLOR_PAIRS){
+            c = IntToColor(fqmin, p);
+            init_color(COLOR_PAIRS-fqmin, c.R,c.G,c.B);
+            init_pair(fqmin, COLOR_PAIRS-fqmin, -1);
+        }
         fqmin++;
     }
 }
@@ -62,7 +86,11 @@ void fqless::winInit(options * opts){
 
 
 void fqless::quit(){
+    
     endwin();
+    erase();
+
+
 }
 
 void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
@@ -158,8 +186,11 @@ fqless::fqless(options* opts){
 
         initscr();                      // start ncurses
         curs_set(0);                    // hide cursor
+        
         start_color();                  // start color mode
-        assume_default_colors(-1,-1);   // make transparent mode possible if supported
+        //rememberTheColors();
+        use_default_colors();   // make transparent mode possible if supported
+        
         atexit(quit);                   // what to do at exit
         init_pair(1, -1, -1);           // default colors, white on standart background
 
@@ -310,7 +341,8 @@ fqless::fqless(options* opts){
                     break;
 
                 case 'q':
-                    quit();
+                    endwin();
+                    //endTheColors();
                     exit(0);
                     break;
             }

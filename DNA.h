@@ -29,10 +29,11 @@ struct base{
 typedef std::vector < base > Tdna; 
 
 struct color {
-    uint R;
-    uint G;
-    uint B;
+    short R;
+    short G;
+    short B;
 };
+
 
 
 
