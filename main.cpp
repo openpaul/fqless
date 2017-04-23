@@ -52,6 +52,7 @@ int main(int argc, char * argv[]) {
     opts->qualitycode = 0;
     opts->buffersize  = 100; // must be at least 3
     opts->showColor   = true;
+    opts->debug       = false;
 
 
     // lets define options and defaults
@@ -66,6 +67,7 @@ int main(int argc, char * argv[]) {
     const struct option longopts[] = {
         {"version",   no_argument,        0, 'v'},
         {"help",      no_argument,        0, 'h'},
+        {"debug",      no_argument,        0, 'd'},
         {"buffer", required_argument,     0, 'b'},
         {0,0,0,0},                          
     };
@@ -76,7 +78,7 @@ int main(int argc, char * argv[]) {
     opterr=0; 
 
 
-    while((c = getopt_long (argc, argv, ":hvb:W",  longopts, &option_index)) != -1){ 
+    while((c = getopt_long (argc, argv, ":hvdb:W",  longopts, &option_index)) != -1){ 
         switch (c) {
             case 'b':
                 opts->buffersize = atoi(optarg);
@@ -86,6 +88,9 @@ int main(int argc, char * argv[]) {
                 break;
             case 'v':
                 showVersion = 1;
+                break;
+            case 'd':
+                opts->debug = true;
                 break;
             case 0:     
                 break;
@@ -120,6 +125,8 @@ int main(int argc, char * argv[]) {
         showTheVersion();
         exit(0);
     }
+    
+    
 
     if(input == NULL){
         cerr << "No input given. See fqless -h for help." << std::endl;

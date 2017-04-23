@@ -132,6 +132,9 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     }else{
         i = firstSeq;
     }
+    
+    int delta =  (int)opts->offset - (int) (opts->avaiLines - opts->textrows );
+    int oldoff = opts->offset;
 
     while(j < linesBelowAndUp && i > 0){
         j = j + linevec[i];
@@ -142,7 +145,9 @@ void fastq::showthese(options* opts, int dir, WINDOW* Wtext){
     // set offset to match the new pad value
     opts->offset = j;
     if(dir == 1){
-        opts->offset -= opts->textrows;
+        opts->offset -= opts->textrows - delta;
+    }else{
+        opts->offset += oldoff;
     }
     if(opts->offset < 0) opts->offset = 0;
 
