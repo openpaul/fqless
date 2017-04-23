@@ -106,7 +106,7 @@ void fqless::fillPad(options* opts, fastq* FQ, int dir=1){
     // we may need to make space for a sequence that a little bit larger then 
     // the buffer and thus then we expected
 
-    //wprintw(Wtext, "Index size %i \n",  FQ->index.size());
+
     if(opts->linesTohave != opts->avaiLines){
         opts->avaiLines = opts->linesTohave;
         wresize(Wtext, opts->avaiLines+1, opts->textcols);
@@ -250,8 +250,9 @@ fqless::fqless(options* opts){
                     }
                     if(opts->offset < 0){opts->offset = 0;} 
 
-
-                    //mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*opts->textrows, opts->avaiLines - opts->textrows -1 );
+                    if(opts->debug){
+                        mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*opts->textrows, opts->avaiLines - opts->textrows -1 );
+                    }
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
                     doupdate();
                     break;
@@ -259,14 +260,16 @@ fqless::fqless(options* opts){
                 case KEY_DOWN:
                     opts->offset++;
 
-                    if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows -2) && ((int)  opts->lastInPad < (int) FQ->index.size())){
+                    if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows - 1) && ((int)  opts->lastInPad < (int) FQ->index.size())){
                         FQ->showthese(opts, 1, Wtext);
                         fillPad(opts, FQ);
                     }
                     if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
-                        opts->offset = opts->avaiLines - opts->textrows -1;
+                        opts->offset = opts->avaiLines - opts->textrows - 1;
                     }
-                    //mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*(LINES-1), opts->avaiLines - opts->textrows -1 );
+                    if(opts->debug){
+                        mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*opts->textrows, opts->avaiLines - opts->textrows -1 );
+                    }
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);                          
                     doupdate();
                     break;
@@ -304,28 +307,34 @@ fqless::fqless(options* opts){
                     break;
 
                 case KEY_NPAGE:
-                    opts->offset += opts->textrows;
+                    opts->offset += opts->textrows + 1 ;
 
-                    if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows -2) && ((int)  opts->lastInPad < (int) FQ->index.size())){
+                    if( (int)opts->offset > (int) (opts->avaiLines - opts->textrows - 1) && ((int)  opts->lastInPad < (int) FQ->index.size())){
                         FQ->showthese(opts, 1, Wtext);
                         fillPad(opts, FQ);
                     }
                     if((int)opts->offset > (int)(opts->avaiLines - opts->textrows - 1)){
                         opts->offset = opts->avaiLines - opts->textrows -1;
                     }
+                    if(opts->debug){
+                        mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*opts->textrows, opts->avaiLines - opts->textrows -1 );
+                    }
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);  
                     doupdate(); 
                     break;
 
                 case KEY_PPAGE:
-                    opts->offset -= opts->textrows;
+                    opts->offset -= (opts->textrows + 1);
                     if(opts->offset < 0 and opts->firstInPad > 0) {
                         FQ->showthese(opts, 0, Wtext);
-                        opts->offset--;
+                        //opts->offset--;
                         fillPad(opts, FQ);
                     }
-                    if(opts->offset < 0){opts->offset = 0;} 
-
+                   
+                    if(opts->debug){
+                        mvwprintw(Wcmd, 0,0, "offset %i lines %i possible offs %i ", opts->offset, opts->buffersize*opts->textrows, opts->avaiLines - opts->textrows -1 );
+                    }
+                     if(opts->offset < 0){opts->offset = 0;} 
                     pnoutrefresh(Wtext, opts->offset,0,0, 0, opts->textrows, opts->textcols);
                     doupdate();
                     break;
