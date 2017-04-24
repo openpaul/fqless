@@ -22,7 +22,7 @@ struct options{
     int buffersize; 
    
     
-     
+    bool debug;
     
     // actually not options but the current state of the software
     int textrows;
