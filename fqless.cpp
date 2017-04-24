@@ -160,11 +160,11 @@ void fqless::statusline(options* opts, fastq* FQ, WINDOW* Wcmd){
     in = fname.size();
     
     if(ie + in < opts->textcols){
-        spacer = std::string(opts->textcols - ie -in -1, ' ');
+        spacer = std::string(opts->textcols - ie -in -3, ' ');
     }else{
         // shorten name;
         int s, e;
-        s = fname.size() - (opts->textcols - ie - 4);
+        s = fname.size() - (opts->textcols - ie - 6);
         e = fname.size();
         if(s > 0){
             fname = "..." + fname.substr(s,e);
@@ -174,7 +174,7 @@ void fqless::statusline(options* opts, fastq* FQ, WINDOW* Wcmd){
     }
     string colorMessage;
     werase(Wcmd);
-    mvwprintw(Wcmd, 0,0, "%s%s %s", fname.c_str(),spacer.c_str(), qname.c_str());
+    mvwprintw(Wcmd, 0,0, "%s%s   %s", fname.c_str(),spacer.c_str(), qname.c_str());
 
     
 }
