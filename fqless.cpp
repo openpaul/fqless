@@ -342,9 +342,15 @@ fqless::fqless(options* opts){
                 case KEY_RESIZE:
 
                     endwin();
+                    refresh();
+                    clear();
                     winInit(opts);
+                    FQ->showthese(opts, 0, Wtext);
                     fillPad(opts, FQ);
                     statusline(opts, FQ, Wcmd);
+                    if(opts->debug){
+                        mvwprintw(Wcmd, 0,0, "resize" );
+                    }
                     refresh();
                     prefresh(Wtext, opts->offset,0,0, 0, LINES-1, COLS);  
                     break;
