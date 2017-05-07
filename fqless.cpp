@@ -3,8 +3,15 @@
 #include "fqless.h"
 #include <math.h>
 #include <future>
-
 /*
+void color_content(int i, short* r, short* g,short* b){
+    *r      = 1000;
+    *b      = 100;
+    *g      = 100;
+    *alpha  = 100;
+    return;
+}
+
 void fqless::rememberTheColors(){
     // remember all the colors
     // the terminal has
