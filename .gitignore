@@ -7,8 +7,5 @@ test*
 autom4te.cache/
 compile
 config.status
-depcomp
 fqless
-install-sh
-missing
-Makefile.in
+Makefile

@@ -3,8 +3,15 @@
 #include "fqless.h"
 #include <math.h>
 #include <future>
-
 /*
+void color_content(int i, short* r, short* g,short* b){
+    *r      = 1000;
+    *b      = 100;
+    *g      = 100;
+    *alpha  = 100;
+    return;
+}
+
 void fqless::rememberTheColors(){
     // remember all the colors
     // the terminal has
@@ -160,11 +167,11 @@ void fqless::statusline(options* opts, fastq* FQ, WINDOW* Wcmd){
     in = fname.size();
     
     if(ie + in < opts->textcols){
-        spacer = std::string(opts->textcols - ie -in -1, ' ');
+        spacer = std::string(opts->textcols - ie -in -3, ' ');
     }else{
         // shorten name;
         int s, e;
-        s = fname.size() - (opts->textcols - ie - 4);
+        s = fname.size() - (opts->textcols - ie - 6);
         e = fname.size();
         if(s > 0){
             fname = "..." + fname.substr(s,e);
@@ -174,7 +181,7 @@ void fqless::statusline(options* opts, fastq* FQ, WINDOW* Wcmd){
     }
     string colorMessage;
     werase(Wcmd);
-    mvwprintw(Wcmd, 0,0, "%s%s %s", fname.c_str(),spacer.c_str(), qname.c_str());
+    mvwprintw(Wcmd, 0,0, "%s%s   %s", fname.c_str(),spacer.c_str(), qname.c_str());
 
     
 }
@@ -342,9 +349,15 @@ fqless::fqless(options* opts){
                 case KEY_RESIZE:
 
                     endwin();
+                    refresh();
+                    clear();
                     winInit(opts);
+                    FQ->showthese(opts, 0, Wtext);
                     fillPad(opts, FQ);
                     statusline(opts, FQ, Wcmd);
+                    if(opts->debug){
+                        mvwprintw(Wcmd, 0,0, "resize" );
+                    }
                     refresh();
                     prefresh(Wtext, opts->offset,0,0, 0, LINES-1, COLS);  
                     break;

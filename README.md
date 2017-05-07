@@ -20,7 +20,9 @@ See all options via `-h` flag.
 ```
 git clone https://github.com/openpaul/fqless
 cd fqless
+./configure
 make
+make install
 ```
 
 #### Activate color support in your terminal
@@ -60,6 +62,13 @@ KISS: Keep it simple, stupid.
 
 # Bugs
 This software has most certainly some heavy bugs. I am testing a lot, but will probably not catch everything. So I am very glad if you submit issues. Best would be to supply a minimal working, or not worging, fastq file, that causes the problem.
+
+### fqless messes up the colors of the terminal
+fqless makes use of ncurses to define needed colors. These are at the moment not reset after fqless terminates and persist in the terminal. So other coloring operations might make use of the colors until the terminal is closed.
+
+### Colors do not work or work incorrectly in screen or tmux
+Yes, this is unfortunate but apparently not easily solvable at the moment. 
+
 
 
 ![asci art](https://raw.githubusercontent.com/openpaul/fqless/master/fqless_asci.png)
