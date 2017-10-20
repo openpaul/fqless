@@ -2,10 +2,14 @@
 #include "fastq.h"
 #include <math.h> 
 
-fastq::fastq(string inPath){
+fastq::fastq(options *opts){
 
-    file        = inPath;
-
+    file        = opts->input;
+    if(checkFile(opts) == false){
+        cout << "This is no fastq file" << std::endl;
+        cout << "Ignore this by setting the -f flag" << std::endl;
+        exit(1);
+    }
     return;
 }
 
@@ -184,6 +188,26 @@ int fastq::getline(gzFile& infile, string& line){
         line.push_back(aa);
     }
     return 1;
+}
+bool fastq::checkFile(options* opts){
+    // opens the input file
+    // checks if the first char is a @ as requested
+    // by the fastq format
+    string line;
+    gzFile infile = gzopen(opts->input, "rb");
+
+    // if we cant open the file there is a problem
+    if(infile == NULL){
+       return false;
+    }
+
+   int i =  getline(infile, line);
+   if(char(line.at(0)) != '@'){
+       return(false);
+   }
+   return(true);
+
+    
 }
 
 void fastq::buildIndex(options* opts){

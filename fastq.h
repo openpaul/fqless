@@ -54,7 +54,7 @@ public:
     int seqOnScreen;
 
     // read fastq file from disk
-    fastq(string);  
+    fastq(options * opts);  
     // read n terminal lines from file, manage which line was the last read one (tellg)
     fastq(const char*, int lines, int cols); 
 
@@ -80,7 +80,7 @@ private:
     // may be  sanger, solexa, illumina1.3, illumina1.5 illumina1.8 
     // for color chemes required
     void countSequences(const char*);
-
+    bool checkFile(options*);
 
 
 

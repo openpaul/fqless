@@ -44,7 +44,7 @@ struct options{
     qualitymap qm; 
     
     bool showColor;
-    
+    bool basicColor; // use default terminal colors
     
 };
 #endif

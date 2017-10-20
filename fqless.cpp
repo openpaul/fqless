@@ -211,7 +211,7 @@ fqless::fqless(options* opts){
             opts->showColor = false;
         }
 
-        fastq* FQ = new fastq(opts->input);
+        fastq* FQ = new fastq(opts);
 
         // here we can build the first index
         // it should index as much as the first buffer only
