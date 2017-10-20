@@ -17,7 +17,7 @@ using namespace std;
 #include "fastq.h"
 #include "fqless.h"
 
-string version = "Version 0.2 Alpha";
+string version = "Version 0.2.1 Alpha";
 
 
 
@@ -31,6 +31,7 @@ void showTheHelp(){
     cout << "-b, --buffer   integer, specifying number of screens to keep in" << std::endl;
     cout << "               buffer for scrolling (default: 100, min: 5)" << std::endl;
     cout << "-d, --debug    enable some debugging info" << std::endl;
+    cout << "-f, --force    force reading of malformed input files"   << std::endl;
     cout << "Color support:" << std::endl;
     cout << "The main feature of fqless is to hide the quality line of a fastq file" << std::endl;
     cout << "and instead color code the DNA accordingly." << std::endl;
