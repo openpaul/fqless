@@ -5,7 +5,7 @@
 fastq::fastq(options *opts){
 
     file        = opts->input;
-    if(checkFile(opts) == false ){
+    if(checkFile(opts) == false and opts->force == false){
         std::cerr << "This is no fastq file" << std::endl;
         std::cerr << "force loading via -f flag" << std::endl;
         exit(1);
