@@ -45,6 +45,7 @@ struct options{
     
     bool showColor;
     bool basicColor; // use default terminal colors
+    bool force; // force reading of file even if no fastq file
     
 };
 #endif

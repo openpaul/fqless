@@ -54,6 +54,7 @@ int main(int argc, char * argv[]) {
     opts->buffersize  = 100; // must be at least 3
     opts->showColor   = true;
     opts->debug       = false;
+    opts->force       = false; // dont force me
 
 
     // lets define options and defaults
@@ -79,7 +80,7 @@ int main(int argc, char * argv[]) {
     opterr=0; 
 
 
-    while((c = getopt_long (argc, argv, ":hvdb:W",  longopts, &option_index)) != -1){ 
+    while((c = getopt_long (argc, argv, ":hvdfb:W",  longopts, &option_index)) != -1){ 
         switch (c) {
             case 'b':
                 opts->buffersize = atoi(optarg);
@@ -92,6 +93,9 @@ int main(int argc, char * argv[]) {
                 break;
             case 'd':
                 opts->debug = true;
+                break;
+            case 'f':
+                opts->force = true;
                 break;
             case 0:     
                 break;

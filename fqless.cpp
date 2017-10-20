@@ -191,6 +191,8 @@ fqless::fqless(options* opts){
 
     if(opts->input != NULL){
 
+        fastq* FQ = new fastq(opts);
+
         initscr();                      // start ncurses
         curs_set(0);                    // hide cursor
         
@@ -211,7 +213,6 @@ fqless::fqless(options* opts){
             opts->showColor = false;
         }
 
-        fastq* FQ = new fastq(opts);
 
         // here we can build the first index
         // it should index as much as the first buffer only
