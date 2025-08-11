@@ -58,3 +58,5 @@ cargo build --release
 # Bugs
 
 This software has most certainly some heavy bugs. I am testing a lot, but will probably not catch everything. So I am very glad if you submit issues. Best would be to supply a minimal working, or not working, fastq file, that causes the problem.
+
+![fqless stat feature](https://raw.githubusercontent.com/openpaul/fqless/master/fqless_stats.png)
