@@ -5,15 +5,15 @@ use crate::reader::FastqReader;
 use anyhow::Result;
 use bio::io::fastq;
 use nix::poll::PollFlags;
-use nix::poll::{PollFd, poll};
+use nix::poll::{poll, PollFd};
 use num_format::{Locale, ToFormattedString};
 use ratatui::{
-    Terminal,
     backend::TermionBackend,
     layout::*,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Bar, BarChart, BarGroup, *},
+    Terminal,
 };
 
 use signal_hook::consts::SIGINT;
@@ -22,8 +22,8 @@ use std::io::stdin;
 use std::os::unix::io::AsRawFd;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -141,10 +141,7 @@ fn create_quality_histogram<'a>(stats: &FastqStats, color_scheme: &ColorScheme) 
         })
         .collect();
 
-    let title = Line::from(Span::styled(
-        "Quality Score Distribution",
-        Style::default().fg(Color::Cyan),
-    ));
+    let title = Line::from(Span::styled("Quality Score Distribution", Style::default()));
     BarChart::default()
         .data(BarGroup::default().bars(&bars))
         .block(Block::new().title(title).borders(Borders::ALL))
@@ -188,7 +185,7 @@ fn create_average_read_quality_histogram<'a>(
 
     let title = Line::from(Span::styled(
         "Average Read Quality Distribution",
-        Style::default().fg(Color::Cyan),
+        Style::default(),
     ));
     BarChart::default()
         .data(BarGroup::default().bars(&bars))
@@ -224,7 +221,7 @@ fn create_position_quality_chart<'a>(
 
     let title = Line::from(Span::styled(
         "Average Quality by Position",
-        Style::default().fg(Color::Cyan),
+        Style::default(),
     ));
     BarChart::default()
         .data(BarGroup::default().bars(&bars))
@@ -381,10 +378,7 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph {
         }
     }
 
-    let title = Line::from(Span::styled(
-        "Adapter Contamination",
-        Style::default().fg(Color::Cyan),
-    ));
+    let title = Line::from(Span::styled("Adapter Contamination", Style::default()));
 
     Paragraph::new(content)
         .block(Block::default().title(title).borders(Borders::ALL))
@@ -860,8 +854,10 @@ impl TuiViewer {
         let available_height = terminal_size.height.saturating_sub(2) as usize;
         // assuming 2 lines for each record as minimum
         let max_visible = available_height / 2;
-        let records = self.buffer.get_window(self.current_position, max_visible)?;
-        // print current position and horizontal offset for debug
+        let records = self
+            .buffer
+            .get_window(self.current_position, max_visible + 5)?; // +5 to ensure we have enough lines loaded
+                                                                  // print current position and horizontal offset for debug
 
         //for i in 0..max_visible {
         for record in records.iter() {
@@ -874,7 +870,7 @@ impl TuiViewer {
             // Header line in cyan
             prepared_lines.push(Line::from(Span::styled(
                 format!("{}", name),
-                Style::default().fg(Color::Cyan),
+                Style::default(),
             )));
             // Handle sequence display based on wrap mode
             let visible_sequence = if no_wrap {
@@ -941,7 +937,7 @@ impl TuiViewer {
 
                 let title = Line::from(Span::styled(
                     format!("FASTQ Statistics {}", status_indicator),
-                    Style::default().fg(Color::White),
+                    Style::default(),
                 ));
                 f.render_widget(title, title_area);
 
@@ -971,10 +967,7 @@ impl TuiViewer {
                         Line::from(format!("GC content: {:.1}%", stats_lock.gc_content)),
                         Line::from(format!("N content: {:.2}%", stats_lock.n_content)),
                     ];
-                    let title = Line::from(Span::styled(
-                        "Basic Statistics",
-                        Style::default().fg(Color::Cyan),
-                    ));
+                    let title = Line::from(Span::styled("Basic Statistics", Style::default()));
                     let basic_stats_block = Paragraph::new(basic_stats_content)
                         .block(Block::default().title(title).borders(Borders::ALL))
                         .wrap(Wrap { trim: true });
@@ -991,7 +984,7 @@ impl TuiViewer {
                     } else {
                         let title = Line::from(Span::styled(
                             "Quality Score Distribution",
-                            Style::default().fg(Color::Cyan),
+                            Style::default(),
                         ));
                         let calculating = Paragraph::new("Calculating quality histogram...")
                             .block(Block::default().title(title).borders(Borders::ALL))
@@ -1011,7 +1004,7 @@ impl TuiViewer {
                     } else {
                         let title = Line::from(Span::styled(
                             "Average Read Quality Distribution",
-                            Style::default().fg(Color::Cyan),
+                            Style::default(),
                         ));
                         let calculating =
                             Paragraph::new("Calculating average quality histogram...")
@@ -1036,7 +1029,7 @@ impl TuiViewer {
                     } else {
                         let title = Line::from(Span::styled(
                             "Average Quality by Position",
-                            Style::default().fg(Color::Cyan),
+                            Style::default(),
                         ));
                         let calculating = Paragraph::new("Calculating position quality...")
                             .block(Block::default().title(title).borders(Borders::ALL))
@@ -1067,16 +1060,13 @@ impl TuiViewer {
 
                 // Status line
                 let status = Paragraph::new(format!("fqless - Help Screen (Press 'h' to exit)"))
-                    .style(Style::default().bg(Color::Blue).fg(Color::White));
+                    .style(Style::default());
 
                 f.render_widget(status, help_chunks[0]);
 
                 // Full screen help content
                 let help_content = vec![
-                    Line::from(Span::styled(
-                        "FQLESS - FastQ File Viewer",
-                        Style::default().fg(Color::Yellow),
-                    )),
+                    Line::from(Span::styled("FQLESS - FastQ File Viewer", Style::default())),
                     Line::from(""),
                     Line::from("Navigation:"),
                     Line::from("  ↑/k        - Move up one record"),
@@ -1133,7 +1123,7 @@ impl TuiViewer {
                     Block::default()
                         .borders(Borders::ALL)
                         .title(format!("Help (Scroll: {}/{})", actual_scroll, max_scroll))
-                        .border_style(Style::default().fg(Color::Cyan)),
+                        .border_style(Style::default()),
                 );
 
                 f.render_widget(help_panel, help_chunks[1]);
@@ -1142,7 +1132,7 @@ impl TuiViewer {
                 let help_footer: Paragraph<'_> = Paragraph::new(
                     "↑/↓: Scroll | PgUp/PgDn: Page | Home: Top | h: Hide Help | q: Quit",
                 )
-                .style(Style::default().fg(Color::Gray));
+                .style(Style::default().fg(Color::DarkGray));
 
                 f.render_widget(help_footer, help_chunks[2]);
 
@@ -1185,7 +1175,7 @@ impl TuiViewer {
                 self.phred_range.base_phred(),
                 self.phred_range.top_phred()
             ))
-            .style(Style::default().bg(Color::Blue).fg(Color::White));
+            .style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
             f.render_widget(status, main_chunks[0]);
 
@@ -1200,7 +1190,7 @@ impl TuiViewer {
 
             // Help line
             let help: Paragraph<'_> =
-                Paragraph::new(help_text).style(Style::default().fg(Color::Gray));
+                Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
 
             f.render_widget(help, main_chunks[2]);
         })?;
