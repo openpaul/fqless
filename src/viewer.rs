@@ -5,15 +5,15 @@ use crate::reader::FastqReader;
 use anyhow::Result;
 use bio::io::fastq;
 use nix::poll::PollFlags;
-use nix::poll::{poll, PollFd};
+use nix::poll::{PollFd, poll};
 use num_format::{Locale, ToFormattedString};
 use ratatui::{
+    Terminal,
     backend::TermionBackend,
     layout::*,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Bar, BarChart, BarGroup, *},
-    Terminal,
 };
 
 use signal_hook::consts::SIGINT;
@@ -22,8 +22,8 @@ use std::io::stdin;
 use std::os::unix::io::AsRawFd;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -857,7 +857,7 @@ impl TuiViewer {
         let records = self
             .buffer
             .get_window(self.current_position, max_visible + 5)?; // +5 to ensure we have enough lines loaded
-                                                                  // print current position and horizontal offset for debug
+        // print current position and horizontal offset for debug
 
         //for i in 0..max_visible {
         for record in records.iter() {
@@ -1079,33 +1079,19 @@ impl TuiViewer {
                     Line::from("Display Options:"),
                     Line::from("  S          - Toggle no-wrap mode (horizontal scrolling)"),
                     Line::from("  ←/→        - Scroll left/right (no-wrap mode only)"),
-                    Line::from("  c          - Toggle quality-based color coding"),
+                    Line::from("  c          - Cycle color schemes"),
                     Line::from("  s          - Toggle statistics panel"),
+                    Line::from("  p          - Toggle base quality display"),
                     Line::from("  h          - Toggle this help screen"),
                     Line::from(""),
                     Line::from("Other:"),
                     Line::from("  q          - Quit"),
                     Line::from(""),
-                    Line::from("Color Coding:"),
-                    Line::from("  High quality bases appear in green"),
-                    Line::from("  Medium quality bases appear in yellow/orange"),
-                    Line::from("  Low quality bases appear in red"),
                     Line::from(""),
                     Line::from("Statistics Panel:"),
-                    Line::from("  Shows real-time analysis of FastQ file"),
-                    Line::from("  Quality histogram shows distribution of quality scores"),
-                    Line::from("  Position quality shows per-base quality across reads"),
-                    Line::from("  GC content and N content percentages"),
-                    Line::from(""),
-                    Line::from("Scrolling:"),
-                    Line::from("  In stats/help mode: ↑/↓ scroll line by line"),
-                    Line::from("  PgUp/PgDn scroll by pages"),
-                    Line::from("  Home goes to top"),
-                    Line::from(""),
-                    Line::from("File Support:"),
-                    Line::from("  Supports both compressed (.gz) and uncompressed FastQ"),
-                    Line::from("  Streaming mode for large files (doesn't load everything)"),
-                    Line::from("  Indexed mode for fast random access in uncompressed files"),
+                    Line::from(
+                        " Displays read statistics, quality histograms, and adapter contamination",
+                    ),
                 ];
 
                 let visible_height = help_chunks[1].height.saturating_sub(2) as usize; // Account for borders
