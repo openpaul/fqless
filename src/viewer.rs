@@ -386,6 +386,112 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph {
 }
 
 impl TuiViewer {
+    /// Calculate how many lines a record takes on screen
+    fn calculate_record_lines(&self, record: &fastq::Record, terminal_width: usize) -> usize {
+        let header_lines = 1; // Header line (ID + description)
+
+        let sequence_lines = if self.no_wrap {
+            1 // No wrapping, always 1 line
+        } else {
+            // Calculate wrapped lines: ceil(sequence_length / terminal_width)
+            let seq_len = record.seq().len();
+            if seq_len == 0 {
+                1
+            } else {
+                (seq_len + terminal_width - 1) / terminal_width // Ceiling division
+            }
+        };
+
+        let quality_lines = if self.show_quality {
+            // same as sequence_lines ofc
+            sequence_lines
+        } else {
+            0
+        };
+
+        header_lines + sequence_lines + quality_lines
+    }
+
+    /// Calculate how many records fit on screen starting from given position
+    /// Returns (records_that_fit, total_lines_used)
+    fn calculate_records_per_page(
+        &self,
+        start_position: u64,
+        terminal_height: usize,
+        terminal_width: usize,
+    ) -> Result<(usize, usize)> {
+        let available_height = terminal_height.saturating_sub(2); // Reserve space for header/footer
+
+        // Read from the already loaded buffer without triggering additional loads
+        let reads_guard = self.buffer.reads.read().unwrap();
+        let start_idx = start_position as usize;
+
+        if start_idx >= reads_guard.len() {
+            return Ok((0, 0)); // No records available at this position
+        }
+
+        let mut lines_used = 0;
+        let mut records_count = 0;
+
+        // Check records from start_position onwards
+        for record in reads_guard.iter().skip(start_idx) {
+            let record_lines = self.calculate_record_lines(record, terminal_width);
+
+            if lines_used + record_lines > available_height {
+                break; // This record wouldn't fit
+            }
+
+            lines_used += record_lines;
+            records_count += 1;
+        }
+
+        Ok((records_count, lines_used))
+    }
+
+    /// Calculate page down: find next position that fills the screen
+    fn calculate_page_down(&self, terminal_height: usize, terminal_width: usize) -> Result<u64> {
+        let (records_per_page, _) = self.calculate_records_per_page(
+            self.current_position,
+            terminal_height,
+            terminal_width,
+        )?;
+
+        // Move by at least 1 record, or by the calculated page size
+        let records_to_move = records_per_page.max(1);
+
+        Ok(self.current_position + records_to_move as u64)
+    }
+
+    /// Calculate page up: find previous position that would fill the screen when moving forward
+    fn calculate_page_up(&self, terminal_height: usize, terminal_width: usize) -> Result<u64> {
+        if self.current_position == 0 {
+            return Ok(0);
+        }
+
+        // We need to work backwards to find where to start so that moving forward
+        // From current position we move bacjwards -1 and sum up the lines
+        // needed until we reach the terminal height
+        let mut lines_used = 0;
+        let mut records_to_move = 0;
+        let reads_guard = self.buffer.reads.read().unwrap();
+        let start_idx = self.current_position as usize;
+        for record in reads_guard.iter().take(start_idx).rev() {
+            let record_lines = self.calculate_record_lines(record, terminal_width);
+            if lines_used + record_lines > terminal_height {
+                break; // This record would not fit
+            }
+            lines_used += record_lines;
+            records_to_move += 1;
+        }
+        // return the position that would fill the screen
+        let new_position = if records_to_move > 0 {
+            self.current_position.saturating_sub(records_to_move as u64)
+        } else {
+            0 // If no records fit, stay at the start
+        };
+        Ok(new_position)
+    }
+
     pub fn new(file_path: String) -> Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
         flag::register(SIGINT, Arc::clone(&running))?;
@@ -800,7 +906,12 @@ impl TuiViewer {
                         } else if self.show_help {
                             self.help_scroll += 10;
                         } else {
-                            self.current_position += 10;
+                            let terminal_size = self.terminal.size()?;
+                            let new_position = self.calculate_page_down(
+                                terminal_size.height as usize,
+                                terminal_size.width as usize,
+                            )?;
+                            self.current_position = new_position;
                             self.buffer.load_window(self.current_position, 1000)?;
                         }
                     }
@@ -810,7 +921,12 @@ impl TuiViewer {
                         } else if self.show_help {
                             self.help_scroll = self.help_scroll.saturating_sub(10);
                         } else {
-                            self.current_position = self.current_position.saturating_sub(10);
+                            let terminal_size = self.terminal.size()?;
+                            let new_position = self.calculate_page_up(
+                                terminal_size.height as usize,
+                                terminal_size.width as usize,
+                            )?;
+                            self.current_position = new_position;
                         }
                     }
                     Key::Home => {
