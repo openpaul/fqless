@@ -99,7 +99,7 @@ fn calculate_stats_layout(area: Rect) -> (Rect, Vec<Vec<Rect>>) {
 
     // Create a 2x3 grid for stats blocks
     let block_layout = Layout::vertical([
-        Constraint::Length(10), // Basic stats and Adapter stats (side by side)
+        Constraint::Length(12), // Basic stats and Adapter stats (side by side)
         Constraint::Length(6),  // Quality histogram and Average Quality histogram (side by side)
         Constraint::Min(6),     // Position quality chart
     ]);
@@ -340,11 +340,11 @@ where
 }
 
 /// Create adapter statistics display
-fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph {
+fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph<'_> {
     let adapter_stats = &stats.adapter_stats;
 
-    let contamination_rate = if stats.total_reads > 0 {
-        (adapter_stats.contaminated_reads as f64 / stats.total_reads as f64) * 100.0
+    let contamination_rate = if stats.processed_reads > 0 {
+        (adapter_stats.contaminated_reads as f64 / stats.processed_reads as f64) * 100.0
     } else {
         0.0
     };
@@ -563,6 +563,22 @@ impl TuiViewer {
         let stop_flag = Arc::clone(&self.stats_stop_flag);
         let reads = Arc::clone(&self.buffer.reads);
         let file_path = self.file_path.clone();
+
+        // Start fast read counter thread first
+        let stats_for_counter = Arc::clone(&self.stats);
+        let file_path_for_counter = file_path.clone();
+        let stop_flag_for_counter = Arc::clone(&self.stats_stop_flag);
+        thread::spawn(move || {
+            if let Err(e) = Self::count_reads_fast(
+                stats_for_counter,
+                file_path_for_counter.as_str(),
+                stop_flag_for_counter,
+            ) {
+                eprintln!("Read counting error: {}", e);
+            }
+        });
+
+        // Start main stats worker
         let handle = thread::spawn(move || {
             if let Err(e) = Self::calculate_stats_background(
                 stats_clone,
@@ -593,6 +609,47 @@ impl TuiViewer {
         if let Ok(mut stats_lock) = self.stats.lock() {
             *stats_lock = FastqStats::default();
         }
+    }
+
+    // Fast read counter - just counts total reads without detailed analysis
+    fn count_reads_fast(
+        stats: Arc<Mutex<FastqStats>>,
+        file_path: &str,
+        stop_flag: Arc<AtomicBool>,
+    ) -> Result<()> {
+        // Skip counting for stdin (can't read twice)
+        if file_path == "-" {
+            return Ok(());
+        }
+
+        let reader = FastqReader::new(file_path)?;
+        let mut total_reads = 0u64;
+
+        for record in reader.into_fastq_reader().records() {
+            let _ = record?;
+
+            if stop_flag.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
+            total_reads += 1;
+
+            // Update count every n reads for faster feedback
+            if total_reads % 100000 == 0 {
+                if let Ok(mut stats_lock) = stats.lock() {
+                    stats_lock.total_reads = total_reads;
+                }
+            }
+        }
+
+        // Final update
+        if !stop_flag.load(Ordering::Relaxed) {
+            if let Ok(mut stats_lock) = stats.lock() {
+                stats_lock.total_reads = total_reads;
+            }
+        }
+
+        Ok(())
     }
 
     fn calculate_stats_background(
@@ -666,11 +723,9 @@ impl TuiViewer {
             total_gc += gc_count;
             total_n += n_count;
 
-            // Detect adapters (only every 10th read to reduce overhead)
-            if total_reads % 10 == 0 {
-                let adapter_detections = adapter_detector.detect_adapters(seq);
-                adapter_detector.update_stats(&mut local_adapter_stats, &adapter_detections);
-            }
+            // Detect adapters in every read
+            let adapter_detections = adapter_detector.detect_adapters(seq);
+            adapter_detector.update_stats(&mut local_adapter_stats, &adapter_detections);
 
             // Process quality scores with optimized loop
             let base_phred = phred_range.base_phred();
@@ -710,33 +765,25 @@ impl TuiViewer {
                     return Ok(());
                 }
 
+                // Update all stats including histograms, but only every 100k reads
                 if let Ok(mut stats_lock) = stats.lock() {
-                    stats_lock.total_reads = total_reads;
                     stats_lock.processed_reads = total_reads;
-                    stats_lock.avg_length = if total_reads > 0 {
-                        total_length as f64 / total_reads as f64
-                    } else {
-                        0.0
-                    };
+                    stats_lock.avg_length = total_length as f64 / total_reads as f64;
                     stats_lock.min_length = if min_length == usize::MAX {
                         0
                     } else {
                         min_length
                     };
                     stats_lock.max_length = max_length;
-                    stats_lock.quality_histogram = quality_histogram.clone();
-                    stats_lock.gc_content = if total_length > 0 {
-                        (total_gc as f64 / total_length as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-                    stats_lock.n_content = if total_length > 0 {
-                        (total_n as f64 / total_length as f64) * 100.0
-                    } else {
-                        0.0
-                    };
+                    stats_lock.gc_content = (total_gc as f64 / total_length as f64) * 100.0;
+                    stats_lock.n_content = (total_n as f64 / total_length as f64) * 100.0;
 
-                    // Calculate average quality per position
+                    // Update histograms (still expensive but only every 100k)
+                    stats_lock.quality_histogram = quality_histogram.clone();
+                    stats_lock.average_read_qualities = average_read_qualities.clone();
+                    stats_lock.adapter_stats = local_adapter_stats.clone();
+
+                    // Calculate position quality
                     stats_lock.position_quality = position_quality_sums
                         .iter()
                         .zip(position_counts.iter())
@@ -748,8 +795,6 @@ impl TuiViewer {
                             }
                         })
                         .collect();
-                    stats_lock.average_read_qualities = average_read_qualities.clone();
-                    stats_lock.adapter_stats = local_adapter_stats.clone();
                 }
             }
         }
@@ -757,7 +802,10 @@ impl TuiViewer {
         // Final update (only if not stopped)
         if !stop_flag.load(Ordering::Relaxed) {
             if let Ok(mut stats_lock) = stats.lock() {
-                stats_lock.total_reads = total_reads;
+                // Only update total_reads if fast counter didn't run (stdin case)
+                if file_path == "-" {
+                    stats_lock.total_reads = total_reads;
+                }
                 stats_lock.processed_reads = total_reads;
                 stats_lock.avg_length = if total_reads > 0 {
                     total_length as f64 / total_reads as f64
@@ -838,12 +886,27 @@ impl TuiViewer {
 
         self.terminal.clear()?;
         let mut last_stats_update = 0;
+        let mut needs_redraw = true;
+        let mut last_terminal_size = self.terminal.size()?;
         loop {
-            // Always draw first to update display
-            self.draw()?;
+            // Check for terminal resize
+            let current_size = self.terminal.size()?;
+            if current_size != last_terminal_size {
+                needs_redraw = true;
+                last_terminal_size = current_size;
+            }
+
+            // Only draw if something changed
+            if needs_redraw {
+                self.draw()?;
+                needs_redraw = false;
+            }
 
             // Read keyboard input - from stdin for files, /dev/tty for piped input
+            let mut had_input = false;
             while let Ok(key) = rx.try_recv() {
+                had_input = true;
+                needs_redraw = true;
                 match key {
                     Key::Char('q') | Key::Ctrl('c') => return Ok(()),
                     Key::Char('c') => {
@@ -963,9 +1026,18 @@ impl TuiViewer {
                 }
             }
 
+            // Redraw if stats are updating (for both stats view and status line in normal view)
+            if !had_input {
+                if let Ok(stats_lock) = self.stats.try_lock() {
+                    if !stats_lock.scanned_all {
+                        needs_redraw = true;
+                    }
+                }
+            }
+
             // Small delay to prevent excessive CPU usage
-            std::thread::sleep(Duration::from_millis(16)); // ~60 FPS
-            last_stats_update += 16;
+            std::thread::sleep(Duration::from_millis(if needs_redraw { 100 } else { 250 }));
+            last_stats_update += if needs_redraw { 100 } else { 250 };
             if use_tty && last_stats_update >= 200 {
                 self.start_stats_worker();
                 last_stats_update = 0;
@@ -1065,11 +1137,11 @@ impl TuiViewer {
                 let is_processing = stats_lock.processed_reads > 0;
 
                 let status_indicator = if is_processing && !stats_lock.scanned_all {
-                    "[loading ...]"
+                    "..."
                 } else if stats_lock.scanned_all {
-                    "[done]"
+                    ""
                 } else {
-                    "[waiting]"
+                    "[stalled]"
                 };
 
                 let title = Line::from(Span::styled(
