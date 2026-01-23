@@ -44,12 +44,12 @@ pub struct FastqStats {
     pub avg_length: f64,
     pub min_length: usize,
     pub max_length: usize,
-    pub quality_histogram: Vec<u64>, // Histogram of quality scores (0-93)
+    pub quality_histogram: Vec<u64>, // Histogram of individual base quality scores (0-93)
     pub position_quality: Vec<f64>,  // Average quality at each position
     pub gc_content: f64,
     pub n_content: f64,
     pub scanned_all: bool,
-    pub average_read_qualities: Vec<f64>, // Average quality per read
+    pub average_read_qualities: Vec<f64>, // Average quality score for each read (one value per read)
     pub adapter_stats: AdapterStats,      // Adapter contamination statistics
 }
 
@@ -130,18 +130,26 @@ fn calculate_stats_layout(area: Rect) -> (Rect, Vec<Vec<Rect>>) {
 
 /// Create quality histogram bar chart
 fn create_quality_histogram<'a>(stats: &FastqStats, color_scheme: &ColorScheme) -> BarChart<'a> {
+    let bin_width = 5;
     let bars: Vec<Bar> = (0..=40)
-        .step_by(2)
+        .step_by(bin_width)
         .map(|q| {
-            let count = stats.quality_histogram.get(q).unwrap_or(&0);
+            // Sum counts for this bin (e.g., Q0-4, Q5-9, etc.)
+            let bin_count: u64 = (q..(q + bin_width).min(stats.quality_histogram.len()))
+                .map(|idx| stats.quality_histogram.get(idx).unwrap_or(&0))
+                .sum();
+
             Bar::default()
-                .value(*count)
+                .value(bin_count)
                 .label(Line::from(format!("Q{}", q)))
                 .style(quality_score_style(q as u8, color_scheme))
         })
         .collect();
 
-    let title = Line::from(Span::styled("Quality Score Distribution", Style::default()));
+    let title = Line::from(Span::styled(
+        "Per-Base Quality Score Distribution",
+        Style::default(),
+    ));
     BarChart::default()
         .data(BarGroup::default().bars(&bars))
         .block(Block::new().title(title).borders(Borders::ALL))
@@ -184,7 +192,7 @@ fn create_average_read_quality_histogram<'a>(
         .collect();
 
     let title = Line::from(Span::styled(
-        "Average Read Quality Distribution",
+        "Average Quality Per Read Distribution",
         Style::default(),
     ));
     BarChart::default()
@@ -341,6 +349,12 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph {
         0.0
     };
 
+    let avg_adapters_per_read = if adapter_stats.contaminated_reads > 0 {
+        adapter_stats.total_adapters_found as f64 / adapter_stats.contaminated_reads as f64
+    } else {
+        0.0
+    };
+
     let mut content = vec![
         Line::from(format!(
             "Contaminated reads: {} ({:.1}%)",
@@ -350,10 +364,11 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph {
             contamination_rate
         )),
         Line::from(format!(
-            "Total adapters found: {}",
+            "Total adapter instances: {} (avg {:.1} per contaminated read)",
             adapter_stats
                 .total_adapters_found
-                .to_formatted_string(&Locale::en)
+                .to_formatted_string(&Locale::en),
+            avg_adapters_per_read
         )),
         Line::from(""),
     ];
@@ -669,7 +684,7 @@ impl TuiViewer {
 
             for (pos, &qual_val) in qual.iter().enumerate() {
                 let quality_score = qual_val.saturating_sub(base_phred);
-                total_qual += qual_val as u32;
+                total_qual += quality_score as u32;
 
                 // Update histogram
                 if (quality_score as usize) < quality_histogram.len() {
@@ -681,13 +696,10 @@ impl TuiViewer {
                 position_counts[pos] += 1;
             }
 
-            let average_quality = {
-                let base_qual_total = seq_len as u32 * base_phred as u32;
-                if total_qual >= base_qual_total {
-                    (total_qual - base_qual_total) as f64 / seq_len as f64
-                } else {
-                    0.0 // Handle underflow case
-                }
+            let average_quality = if seq_len > 0 {
+                total_qual as f64 / seq_len as f64
+            } else {
+                0.0
             };
 
             average_read_qualities.push(average_quality);
@@ -884,11 +896,20 @@ impl TuiViewer {
                     Key::Down | Key::Char('j') => {
                         if self.show_stats {
                             self.stats_scroll += 1;
+                            // Bug: we can still scroll past the end of stats text, although stats is not scrollable rn
                         } else if self.show_help {
                             self.help_scroll += 1;
+                            // Bug: we can still scroll past the end of help text
                         } else {
                             self.current_position += 1;
                             self.buffer.load_window(self.current_position, 1000)?;
+                            // if records are empty or we reached the end, don't go further
+                            if self.current_position
+                                >= self.buffer.reads.read().unwrap().len() as u64
+                            {
+                                self.current_position =
+                                    self.buffer.reads.read().unwrap().len() as u64 - 1;
+                            }
                         }
                     }
                     Key::Up | Key::Char('k') => {
@@ -1044,11 +1065,11 @@ impl TuiViewer {
                 let is_processing = stats_lock.processed_reads > 0;
 
                 let status_indicator = if is_processing && !stats_lock.scanned_all {
-                    "🔄"
+                    "[loading ...]"
                 } else if stats_lock.scanned_all {
-                    "✅"
+                    "[done]"
                 } else {
-                    "⏳"
+                    "[waiting]"
                 };
 
                 let title = Line::from(Span::styled(

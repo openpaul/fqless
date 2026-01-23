@@ -50,6 +50,9 @@ impl DisplayBuffer {
     pub fn get_window(&mut self, position: u64, n: usize) -> Result<Vec<fastq::Record>> {
         // Ensure we have enough records loaded
         if !self.fully_loaded || position + n as u64 > self.buffer_end {
+            if position >= self.buffer_end {
+                return Ok(vec![]);
+            }
             self.load_window(position, n)?;
         }
 
