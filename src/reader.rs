@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use bio::io::fastq;
 use flate2::bufread::MultiGzDecoder;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Seek};
 
 /// Unified reader that handles both files and stdin, with automatic compression detection
 pub struct FastqReader {
@@ -32,20 +32,19 @@ impl FastqReader {
             let mut magic = [0; 2];
             let reader: Box<dyn BufRead> = match file.read_exact(&mut magic) {
                 Ok(_) => {
+                    // Rewind to start of file
+                    file.seek(std::io::SeekFrom::Start(0))?;
                     if magic == [0x1f, 0x8b] {
-                        // Gzipped file - reopen to get a clean handle
-                        let file = File::open(input)?;
+                        // Gzipped file
                         let gz_decoder = MultiGzDecoder::new(BufReader::new(file));
                         Box::new(BufReader::new(gz_decoder))
                     } else {
-                        // Plain text file - reopen to get a clean handle
-                        let file = File::open(input)?;
+                        // Plain text file
                         Box::new(BufReader::new(file))
                     }
                 }
                 Err(_) => {
                     // Empty file or error - treat as plain text
-                    let file = File::open(input)?;
                     Box::new(BufReader::new(file))
                 }
             };

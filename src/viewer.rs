@@ -37,6 +37,10 @@ use termion::{
     screen::{AlternateScreen, IntoAlternateScreen},
 };
 
+// Constants for buffer and scrolling behavior
+const BUFFER_WINDOW_SIZE: usize = 1000;
+const PAGE_SCROLL_AMOUNT: usize = 10;
+
 #[derive(Debug, Clone)]
 pub struct FastqStats {
     pub total_reads: u64,
@@ -862,7 +866,8 @@ impl TuiViewer {
 
     pub fn run(&mut self) -> Result<()> {
         // Load initial record
-        self.buffer.load_window(self.current_position, 1000)?;
+        self.buffer
+            .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
 
         // Determine where to read keyboard input from:
         // - If reading from a file, stdin is available for keyboard input
@@ -955,13 +960,12 @@ impl TuiViewer {
                     Key::Down | Key::Char('j') => {
                         if self.show_stats {
                             self.stats_scroll += 1;
-                            // Bug: we can still scroll past the end of stats text, although stats is not scrollable rn
                         } else if self.show_help {
                             self.help_scroll += 1;
-                            // Bug: we can still scroll past the end of help text
                         } else {
                             self.current_position += 1;
-                            self.buffer.load_window(self.current_position, 1000)?;
+                            self.buffer
+                                .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
                             // if records are empty or we reached the end, don't go further
                             if self.current_position
                                 >= self.buffer.reads.read().unwrap().len() as u64
@@ -982,9 +986,9 @@ impl TuiViewer {
                     }
                     Key::PageDown | Key::Char('J') | Key::Char(' ') => {
                         if self.show_stats {
-                            self.stats_scroll += 10;
+                            self.stats_scroll += PAGE_SCROLL_AMOUNT;
                         } else if self.show_help {
-                            self.help_scroll += 10;
+                            self.help_scroll += PAGE_SCROLL_AMOUNT;
                         } else {
                             let terminal_size = self.terminal.size()?;
                             let new_position = self.calculate_page_down(
@@ -992,14 +996,16 @@ impl TuiViewer {
                                 terminal_size.width as usize,
                             )?;
                             self.current_position = new_position;
-                            self.buffer.load_window(self.current_position, 1000)?;
+                            self.buffer
+                                .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
                         }
                     }
                     Key::PageUp | Key::Char('K') => {
                         if self.show_stats {
-                            self.stats_scroll = self.stats_scroll.saturating_sub(10);
+                            self.stats_scroll =
+                                self.stats_scroll.saturating_sub(PAGE_SCROLL_AMOUNT);
                         } else if self.show_help {
-                            self.help_scroll = self.help_scroll.saturating_sub(10);
+                            self.help_scroll = self.help_scroll.saturating_sub(PAGE_SCROLL_AMOUNT);
                         } else {
                             let terminal_size = self.terminal.size()?;
                             let new_position = self.calculate_page_up(
