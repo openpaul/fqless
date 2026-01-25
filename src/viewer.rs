@@ -5,15 +5,15 @@ use crate::reader::FastqReader;
 use anyhow::Result;
 use bio::io::fastq;
 use nix::poll::PollFlags;
-use nix::poll::{PollFd, poll};
+use nix::poll::{poll, PollFd};
 use num_format::{Locale, ToFormattedString};
 use ratatui::{
-    Terminal,
     backend::TermionBackend,
     layout::*,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Bar, BarChart, BarGroup, *},
+    Terminal,
 };
 
 use signal_hook::consts::SIGINT;
@@ -22,8 +22,8 @@ use std::io::stdin;
 use std::os::unix::io::AsRawFd;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -175,7 +175,6 @@ fn create_average_read_quality_histogram<'a>(
     let bars: Vec<Bar> = (0..num_bins)
         .map(|i| {
             let range_start = i * bin_width;
-            let _range_end = range_start + bin_width;
             let count = bins[i];
 
             let label = if i == num_bins - 1 {
@@ -708,15 +707,12 @@ impl TuiViewer {
             let mut gc_count = 0u64;
             let mut n_count = 0u64;
 
-            // Fast GC/N counting using unsafe for performance
-            unsafe {
-                let seq_ptr = seq.as_ptr();
-                for i in 0..seq.len() {
-                    match *seq_ptr.add(i) {
-                        b'G' | b'g' | b'C' | b'c' => gc_count += 1,
-                        b'N' | b'n' => n_count += 1,
-                        _ => {}
-                    }
+            // Fast GC/N counting
+            for &base in seq {
+                match base {
+                    b'G' | b'g' | b'C' | b'c' => gc_count += 1,
+                    b'N' | b'n' => n_count += 1,
+                    _ => {}
                 }
             }
 
@@ -1066,7 +1062,7 @@ impl TuiViewer {
         let records = self
             .buffer
             .get_window(self.current_position, max_visible + 5)?; // +5 to ensure we have enough lines loaded
-        // print current position and horizontal offset for debug
+                                                                  // print current position and horizontal offset for debug
 
         //for i in 0..max_visible {
         for record in records.iter() {
@@ -1245,12 +1241,6 @@ impl TuiViewer {
                             .alignment(Alignment::Center);
                         f.render_widget(calculating, *position_area);
                     }
-                }
-
-                // Adapter stats block
-                if let Some(adapter_area) = main_areas.get(0).and_then(|areas| areas.get(1)) {
-                    let adapter_stats_block = create_adapter_stats_display(&stats_lock);
-                    f.render_widget(adapter_stats_block, *adapter_area);
                 }
 
                 return; // Exit early, don't render main content
