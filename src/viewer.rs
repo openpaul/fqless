@@ -1040,8 +1040,18 @@ impl TuiViewer {
             // Small delay to prevent excessive CPU usage
             std::thread::sleep(Duration::from_millis(if needs_redraw { 100 } else { 250 }));
             last_stats_update += if needs_redraw { 100 } else { 250 };
+
+            // For stdin input, check if stats worker needs to be restarted
+            // Only restart if it has finished or crashed, not repeatedly
             if use_tty && last_stats_update >= 200 {
-                self.start_stats_worker();
+                let worker_finished = self
+                    .stats_worker_handle
+                    .as_ref()
+                    .map_or(true, |h| h.is_finished());
+
+                if worker_finished {
+                    self.start_stats_worker();
+                }
                 last_stats_update = 0;
             }
         }
