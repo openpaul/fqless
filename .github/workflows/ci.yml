@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master", "rust"]
+    branches: [main]
   pull_request:
-    branches: ["main", "master", "rust"]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,18 +15,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source ~/.cargo/env
-          rustup component add rustfmt clippy
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check formatting
@@ -36,7 +34,4 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test
-
-      - name: Build
-        run: cargo build --release
+        run: cargo test --verbose
