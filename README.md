@@ -1,17 +1,28 @@
 # fqless - FastQ Less
 
-fqless is intended to be a small less-like viewer for FastQ sequencing files. Allowing the user to get a quick glance at their sequencing data without the need of a heavy GUI/Java-bloatware.
+![Coverage](coverage-badge.svg) ![Coverage (no TUI)](coverage-no-tui-badge.svg)
 
-It displays the name and the color coded sequence. It hides the quality line from the user, as this is machine information for machines and not for human beings.
+fqless is a small less-like viewer for FastQ sequencing files. It allows the user to get a quick glance at their sequencing data without the need for a heavy GUI.
 
-It has no problem opening many gigabytes of fastq files, as it will not load everything, but will be buffering based on an index, it builds in memory. Thus after opening a large file, you will see high CPU usage until the index is build, but you can already see everything.
+It displays the name and the color-coded sequence. It hides the quality line from the user, as this is machine information for machines and not for human beings.
+
+It has no problem opening many gigabytes of FASTQ files, as it will not load everything but will stream the reads.
+It also spawns workers to build a FastQC-like stats page (access via pressing `s`). As such, after opening a file you will see high CPU usage as reads are counted and adapters are detected.
 
 fqless is released under the GPLv2 or any newer version of the GPL. It comes with no warranty. Use it as you wish.
 
 Use it via
 
+```sh
+fqless file.fastq.gz
+fqless file.fastq
 ```
-fqless file.tar.gz
+
+Or pipe into it (although stats are then only shown for all loaded reads, not the whole file):
+
+```sh
+cat file.fastq | fqless
+cat file.fastq.gz | fqless
 ```
 
 See all options via `-h` flag.
@@ -23,58 +34,57 @@ See all options via `-h` flag.
 ```
 git clone https://github.com/openpaul/fqless
 cd fqless
-make
-sudo make install
+cargo build --release
 ```
-
-You can then move the binary
-
-#### Activate color support in your terminal
-
-To color code the DNA fqless uses ncurses which requires you to use a 256 color compatible terminal. Most modern terminal emulators have this build in but sometimes this needs to be activated in your `.bashrc` by inserting the line `TERM=xterm-256color`.
-
-### On Windows:
-
-Install UNIX then GOTO UNIX.
-
-Seriously: I don't have access to a Windows PC and no interest in porting this to windows. If you want to make a pull request with a working patch, feel free to do so.
 
 ## What it does
 
 ![a screenshot of fqless](https://raw.githubusercontent.com/openpaul/fqless/master/fqless.png)
 
 - Opens the file, shows the sequence color coded, so one can decide if the run quality is nice and fits the expectations.
-  It tries to guess the quality encoding of the file but you can also change that live, if it guessed the wrong one.
-- Move by arrow keys. Change quality encoding by right and left arrow.
+- Shows number of reads and some basic statistics
+
+## Statistics (press 's')
+
+fqless calculates some statistics in the background:
+
+### Basic Statistics
+- **Total reads**: Total number of reads in the file (counted quickly in a separate thread)
+- **Processed**: Number of reads analyzed for detailed stats (will eventually be equal to total reads)
+- **Avg/Min/Max length**: Read length statistics
+- **GC content**: Percentage of G and C bases
+- **N content**: Percentage of ambiguous (N) bases
+
+### Quality Metrics
+- **Per-Base Quality Score Distribution**: Shows the distribution of quality scores for individual bases across all reads. Quality scores are binned in groups of 5 (Q0-4, Q5-9, etc.).
+- **Average Quality Per Read Distribution**: Shows the distribution of average quality scores per read. Each read contributes one value (its mean quality).
+- **Average Quality by Position**: Quality scores averaged across all reads at each position in the read.
+
+### Adapter Contamination
+- **Contaminated reads**: Number and percentage of reads containing adapter sequences
+- **Total adapter instances**: Total adapter sequences found (a single read may contain multiple adapters)
+- **Top adapters detected**: Lists the most common adapter sequences found with their frequency and average position
+
+Supported adapter types:
+- Illumina (TruSeq Universal, TruSeq Index, Nextera)
+- Oxford Nanopore (Rapid and Ligation adapters)
+- PacBio (SMRTbell and Iso-Seq)
+- PolyA tails
 
 ## What it does not
+- Write to disk: Nothing is written to disk
+- Search: I chose to no have search but feel free to open a PR is you think it can be done well (consider performance, dependencies, memory)
 
-It does not allow to do anything else (no mapping, no trimming, no whatsoever).
-
-KISS: Keep it simple, stupid.
-
-## Features
-
-- Parse FastQ [done]
-- read plain text as well as tar.gz [done]
-- Detect encoding [done]
-- Color code sequence [done]
-- allow switching between encodings, only if multiple encodings are in question [done]
-- allows conversion to other encodings [maybe]
-- allow STDIN [canceled, because, who wants that?]
-- write fastq, allow conversion between encodings [todo, maybe]
-- write fasta [todo, maybe]
 
 # Bugs
 
-This software has most certainly some heavy bugs. I am testing a lot, but will probably not catch everything. So I am very glad if you submit issues. Best would be to supply a minimal working, or not worging, fastq file, that causes the problem.
+This software has most certainly some bugs. 
+I am testing a lot, but will probably not catch everything. 
+So I am very glad if you submit issues. Best would be to supply a minimal working, or not working, fastq file, that causes the problem.
 
-### fqless messes up the colors of the terminal
+![fqless stat feature](https://raw.githubusercontent.com/openpaul/fqless/master/fqless_stats.png)
 
-fqless makes use of ncurses to define needed colors. These are at the moment not reset after fqless terminates and persist in the terminal. So other coloring operations might make use of the colors until the terminal is closed.
 
-### Colors do not work or work incorrectly in screen or tmux
+## LLM disclaimer
 
-Yes, this is unfortunate but apparently not easily solvable at the moment.
-
-![asci art](https://raw.githubusercontent.com/openpaul/fqless/master/fqless_asci.png)
+Claude Sonnet 4.5 was used intermittely during development.

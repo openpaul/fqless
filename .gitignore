@@ -8,3 +8,7 @@ autom4te.cache/
 compile
 config.status
 fqless
+Makefile
+target
+Cargo.lock
+*fastq.gz
