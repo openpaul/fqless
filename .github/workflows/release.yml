@@ -101,12 +101,12 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/fqless
 
-      - name: Archive binary
-        run: tar -czf fqless-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release fqless
+      - name: Rename binary
+        run: cp target/${{ matrix.target }}/release/fqless fqless-${{ matrix.target }}
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
-          files: fqless-${{ matrix.target }}.tar.gz
+          files: fqless-${{ matrix.target }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
