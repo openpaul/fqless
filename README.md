@@ -1,5 +1,7 @@
 # fqless - FastQ Less
 
+![Coverage](coverage-badge.svg) ![Coverage (no TUI)](coverage-no-tui-badge.svg)
+
 fqless is a small less-like viewer for FastQ sequencing files. It allows the user to get a quick glance at their sequencing data without the need for a heavy GUI.
 
 It displays the name and the color-coded sequence. It hides the quality line from the user, as this is machine information for machines and not for human beings.
