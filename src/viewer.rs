@@ -998,10 +998,7 @@ impl TuiViewer {
                 record.id().to_string()
             };
             // Header line in cyan
-            prepared_lines.push(Line::from(Span::styled(
-                name.to_string(),
-                Style::default(),
-            )));
+            prepared_lines.push(Line::from(Span::styled(name.to_string(), Style::default())));
             // Handle sequence display based on wrap mode
             let visible_sequence = if no_wrap {
                 let start = horizontal_offset.min(record.seq().len());
