@@ -179,3 +179,65 @@ impl Default for AdapterDetector {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reverse_complement() {
+        let seq = b"ACGT";
+        let rc = AdapterDetector::revcomp(seq);
+        assert_eq!(rc, b"ACGT", "ACGT should be its own reverse complement");
+
+        let seq2 = b"AAAA";
+        let rc2 = AdapterDetector::revcomp(seq2);
+        assert_eq!(rc2, b"TTTT", "AAAA reverse complement should be TTTT");
+
+        let seq3 = b"GATTACA";
+        let rc3 = AdapterDetector::revcomp(seq3);
+        assert_eq!(
+            rc3, b"TGTAATC",
+            "GATTACA reverse complement should be TGTAATC"
+        );
+    }
+
+    #[test]
+    fn test_adapter_detection() {
+        let detector = AdapterDetector::new();
+
+        // Test with a known Illumina adapter sequence
+        let sequence = b"GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAAGATCGGAAGAGCACAC";
+        let detections = detector.detect_adapters(sequence);
+
+        assert!(
+            !detections.is_empty(),
+            "Should detect TruSeq_Universal adapter"
+        );
+        assert_eq!(detections[0].adapter_name, "TruSeq_Universal");
+        assert_eq!(detections[0].position, 32);
+    }
+
+    #[test]
+    fn test_stats_update() {
+        let detector = AdapterDetector::new();
+        let mut stats = AdapterStats::default();
+
+        // Create a detection
+        let detections = vec![AdapterDetection {
+            adapter_name: "TruSeq_Universal".to_string(),
+            position: 50,
+        }];
+
+        detector.update_stats(&mut stats, &detections);
+
+        assert_eq!(stats.contaminated_reads, 1);
+        assert_eq!(stats.total_adapters_found, 1);
+        assert_eq!(stats.adapter_positions[50], 1);
+        assert!(stats.adapters_detected.contains_key("TruSeq_Universal"));
+
+        let adapter_match = stats.adapters_detected.get("TruSeq_Universal").unwrap();
+        assert_eq!(adapter_match.count, 1);
+        assert_eq!(adapter_match.avg_position, 50.0);
+    }
+}
