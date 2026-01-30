@@ -37,25 +37,8 @@ jobs:
       - name: Test
         run: cargo test
 
-  create-release:
-    runs-on: ubuntu-latest
-    needs: test
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
-
   build-and-release:
-    needs: [test, create-release]
+    needs: test
     permissions:
       contents: write
     strategy:
@@ -63,6 +46,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
@@ -87,6 +72,12 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install cross-compilation tools (Linux i686)
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -98,18 +89,24 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
-      - name: Strip binary
+      - name: Strip binary (non-cross-compiled)
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'i686-unknown-linux-gnu'
         run: strip target/${{ matrix.target }}/release/fqless
+
+      - name: Strip binary (i686 Linux)
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: strip target/${{ matrix.target }}/release/fqless
+
+      - name: Strip binary (ARM64 Linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/fqless
 
       - name: Archive binary
         run: tar -czf fqless-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release fqless
 
       - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
+        uses: softprops/action-gh-release@v1
+        with:
+          files: fqless-${{ matrix.target }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./fqless-${{ matrix.target }}.tar.gz
-          asset_name: fqless-${{ matrix.target }}.tar.gz
-          asset_content_type: application/gzip
