@@ -66,3 +66,35 @@ impl DisplayBuffer {
         Ok(self.reads.read().unwrap()[position as usize..return_until as usize].to_vec())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn create_test_fastq_file() -> NamedTempFile {
+        let content = "@SEQ1\nACGT\n+\nIIII\n@SEQ2\nGGGG\n+\nJJJJ\n@SEQ3\nTTTT\n+\nKKKK\n";
+        let mut file = NamedTempFile::new().expect("Failed to create temp file");
+        file.write_all(content.as_bytes())
+            .expect("Failed to write to temp file");
+        file.flush().expect("Failed to flush temp file");
+        file
+    }
+
+    #[test]
+    fn test_buffer_creation() {
+        let temp_file = create_test_fastq_file();
+        let path = temp_file.path().to_str().unwrap();
+
+        let buffer = DisplayBuffer::new(path);
+        assert!(buffer.is_ok(), "Should successfully create DisplayBuffer");
+
+        let buffer = buffer.unwrap();
+        assert_eq!(
+            buffer.reads.read().unwrap().len(),
+            0,
+            "Buffer should start empty"
+        );
+    }
+}

@@ -2,6 +2,7 @@ use crate::adapter::{AdapterDetector, AdapterStats};
 use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
 use crate::reader::FastqReader;
+use crate::utils::{calculate_record_lines, determine_min_max_phred, PhredRange};
 use anyhow::Result;
 use bio::io::fastq;
 use nix::poll::PollFlags;
@@ -245,75 +246,6 @@ fn create_position_quality_chart<'a>(
 fn quality_score_style(quality: u8, color_scheme: &ColorScheme) -> Style {
     Style::default().fg(color_scheme.quality_to_color(quality))
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PhredRange {
-    Solexa,
-    Illumina1_3,
-    Illumina1_5,
-    Default,
-}
-
-impl PhredRange {
-    fn range(&self) -> Option<(u8, u8)> {
-        match self {
-            Self::Default => Some((33, 126)),
-            Self::Solexa => Some((59, 104)),
-            Self::Illumina1_3 => Some((64, 126)),
-            Self::Illumina1_5 => Some((64, 126)),
-        }
-    }
-
-    fn all() -> &'static [Self] {
-        &[
-            Self::Solexa,
-            Self::Illumina1_3,
-            Self::Illumina1_5,
-            Self::Default,
-        ]
-    }
-
-    fn from_min_max(min: u8, max: u8) -> Self {
-        for variant in Self::all() {
-            if let Some((rmin, rmax)) = variant.range() {
-                if min >= rmin && max <= rmax {
-                    return *variant;
-                }
-            }
-        }
-        Self::Default
-    }
-
-    fn base_phred(&self) -> u8 {
-        self.range().map(|(min, _)| min).unwrap_or(0)
-    }
-
-    fn top_phred(&self) -> u8 {
-        self.range().map(|(_, max)| max).unwrap_or(0)
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Solexa => "Solexa",
-            Self::Illumina1_3 => "Illumina 1.3",
-            Self::Illumina1_5 => "Illumina 1.8",
-            Self::Default => "Default",
-        }
-    }
-}
-
-fn determine_min_max_phred(records: &[fastq::Record]) -> (u8, u8) {
-    let mut min_phred = u8::MAX;
-    let mut max_phred = u8::MIN;
-
-    for record in records {
-        for &q in record.qual() {
-            min_phred = min_phred.min(q);
-            max_phred = max_phred.max(q);
-        }
-    }
-
-    (min_phred, max_phred)
-}
 
 fn stdin_has_data() -> bool {
     let fd = stdin().as_raw_fd();
@@ -406,28 +338,7 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph<'_> {
 impl TuiViewer {
     /// Calculate how many lines a record takes on screen
     fn calculate_record_lines(&self, record: &fastq::Record, terminal_width: usize) -> usize {
-        let header_lines = 1; // Header line (ID + description)
-
-        let sequence_lines = if self.no_wrap {
-            1 // No wrapping, always 1 line
-        } else {
-            // Calculate wrapped lines: ceil(sequence_length / terminal_width)
-            let seq_len = record.seq().len();
-            if seq_len == 0 {
-                1
-            } else {
-                (seq_len + terminal_width - 1) / terminal_width // Ceiling division
-            }
-        };
-
-        let quality_lines = if self.show_quality {
-            // same as sequence_lines ofc
-            sequence_lines
-        } else {
-            0
-        };
-
-        header_lines + sequence_lines + quality_lines
+        calculate_record_lines(record, terminal_width, self.no_wrap, self.show_quality)
     }
 
     /// Calculate how many records fit on screen starting from given position

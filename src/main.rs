@@ -3,6 +3,7 @@ mod app;
 mod buffer;
 mod color;
 mod reader;
+mod utils;
 mod viewer;
 use app::run;
 use std::env;
