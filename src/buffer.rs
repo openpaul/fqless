@@ -25,12 +25,12 @@ impl DisplayBuffer {
         let buffer_end = 0;
         let fully_loaded = false;
 
-        return Ok(DisplayBuffer {
+        Ok(DisplayBuffer {
             records,
             reads,
             buffer_end,
             fully_loaded,
-        });
+        })
     }
     pub fn load_window(&mut self, position: u64, n: usize) -> Result<()> {
         while self.buffer_end < position + n as u64 {

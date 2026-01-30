@@ -13,13 +13,13 @@ fn print_usage() {
     println!("Options:");
     println!("  -h, --help     Show this help message");
     println!("\nIf <FASTQ file> is '-', reads from stdin.");
-    println!("");
+    println!();
     println!("Examples:");
     println!("  fqless myfile.fastq.gz           # View a gzipped FASTQ file");
     println!("  fqless myfile.fastq              # View a regular FASTQ file");
     println!("  cat myfile.fastq.gz | fqless -   # View gzipped FASTQ from stdin");
     println!("  cat myfile.fastq | fqless -      # View regular FASTQ from stdin");
-    println!("");
+    println!();
     println!("Note: Statistics are limited to the loaded reads when using stdin.");
 }
 

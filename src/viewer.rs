@@ -251,7 +251,7 @@ fn stdin_has_data() -> bool {
     let fd = stdin().as_raw_fd();
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };
     let mut fds = [PollFd::new(fd, PollFlags::POLLIN)];
-    match poll(&mut fds, nix::poll::PollTimeout::from(Some(250 as u16))) {
+    match poll(&mut fds, nix::poll::PollTimeout::from(Some(250_u16))) {
         Ok(n) if n > 0 => fds[0].revents().unwrap().contains(PollFlags::POLLIN),
         _ => false,
     }
@@ -263,11 +263,9 @@ where
 {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        for key in key_iter {
-            if let Ok(k) = key {
-                if tx.send(k).is_err() {
-                    break;
-                }
+        for k in key_iter.flatten() {
+            if tx.send(k).is_err() {
+                break;
             }
         }
     });
@@ -549,7 +547,7 @@ impl TuiViewer {
             total_reads += 1;
 
             // Update count every n reads for faster feedback
-            if total_reads % 100000 == 0 {
+            if total_reads.is_multiple_of(100000) {
                 if let Ok(mut stats_lock) = stats.lock() {
                     stats_lock.total_reads = total_reads;
                 }
@@ -596,7 +594,7 @@ impl TuiViewer {
         let reads: Box<dyn Iterator<Item = Result<bio::io::fastq::Record, bio::io::fastq::Error>>> =
             if is_stdin {
                 let guard = reads.read().unwrap();
-                let records = guard.clone().into_iter().map(|r| Ok(r));
+                let records = guard.clone().into_iter().map(Ok);
                 Box::new(records)
             } else {
                 let reader = FastqReader::new(file_path)?;
@@ -671,7 +669,7 @@ impl TuiViewer {
             average_read_qualities.push(average_quality);
 
             // Update stats every so often and check stop flag
-            if total_reads % 100000 == 0 {
+            if total_reads.is_multiple_of(100000) {
                 if stop_flag.load(Ordering::Relaxed) {
                     return Ok(());
                 }
@@ -958,7 +956,7 @@ impl TuiViewer {
                 let worker_finished = self
                     .stats_worker_handle
                     .as_ref()
-                    .map_or(true, |h| h.is_finished());
+                    .is_none_or(|h| h.is_finished());
 
                 if worker_finished {
                     self.start_stats_worker();
@@ -1000,17 +998,14 @@ impl TuiViewer {
                 record.id().to_string()
             };
             // Header line in cyan
-            prepared_lines.push(Line::from(Span::styled(
-                format!("{}", name),
-                Style::default(),
-            )));
+            prepared_lines.push(Line::from(Span::styled(name.to_string(), Style::default())));
             // Handle sequence display based on wrap mode
             let visible_sequence = if no_wrap {
                 let start = horizontal_offset.min(record.seq().len());
                 let end = (start + terminal_width.saturating_sub(1)).min(record.seq().len());
                 &record.seq()[start..end]
             } else {
-                &record.seq()
+                record.seq()
             };
 
             let visible_quality = if no_wrap && record.qual().len() > horizontal_offset {
@@ -1018,7 +1013,7 @@ impl TuiViewer {
                     (horizontal_offset + terminal_width.saturating_sub(1)).min(record.qual().len());
                 &record.qual()[horizontal_offset..quality_end]
             } else {
-                &record.qual()
+                record.qual()
             };
 
             let sequence_spans = if !self.show_quality {
@@ -1074,7 +1069,7 @@ impl TuiViewer {
                 f.render_widget(title, title_area);
 
                 // Basic stats block
-                if let Some(basic_area) = main_areas.get(0).and_then(|areas| areas.get(0)) {
+                if let Some(basic_area) = main_areas.first().and_then(|areas| areas.first()) {
                     let basic_stats_content = vec![
                         // format the total reads with spaces for better readability for high numbers
                         // eg. "Total reads: 1 234 567"
@@ -1108,7 +1103,7 @@ impl TuiViewer {
                 }
 
                 // Quality histogram block (left side)
-                if let Some(histogram_area) = main_areas.get(1).and_then(|areas| areas.get(0)) {
+                if let Some(histogram_area) = main_areas.get(1).and_then(|areas| areas.first()) {
                     if !stats_lock.quality_histogram.is_empty() {
                         let quality_chart =
                             create_quality_histogram(&stats_lock, &self.color_scheme);
@@ -1147,13 +1142,13 @@ impl TuiViewer {
                 }
 
                 // Adapter stats block
-                if let Some(adapter_area) = main_areas.get(0).and_then(|areas| areas.get(1)) {
+                if let Some(adapter_area) = main_areas.first().and_then(|areas| areas.get(1)) {
                     let adapter_stats_block = create_adapter_stats_display(&stats_lock);
                     f.render_widget(adapter_stats_block, *adapter_area);
                 }
 
                 // Position quality block
-                if let Some(position_area) = main_areas.get(2).and_then(|areas| areas.get(0)) {
+                if let Some(position_area) = main_areas.get(2).and_then(|areas| areas.first()) {
                     if !stats_lock.position_quality.is_empty() {
                         let position_chart =
                             create_position_quality_chart(&stats_lock, &self.color_scheme);
@@ -1185,7 +1180,7 @@ impl TuiViewer {
                     .split(full_area);
 
                 // Status line
-                let status = Paragraph::new(format!("fqless - Help Screen (Press 'h' to exit)"))
+                let status = Paragraph::new("fqless - Help Screen (Press 'h' to exit)".to_string())
                     .style(Style::default());
 
                 f.render_widget(status, help_chunks[0]);

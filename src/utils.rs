@@ -87,7 +87,7 @@ pub fn calculate_record_lines(
         if seq_len == 0 {
             1
         } else {
-            (seq_len + terminal_width - 1) / terminal_width // Ceiling division
+            seq_len.div_ceil(terminal_width) // Ceiling division
         }
     };
 
