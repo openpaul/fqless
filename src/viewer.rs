@@ -98,6 +98,7 @@ pub struct TuiViewer {
     orientation: ReadOrientation,
     show_translation: bool,
     stats_scroll: usize,
+    stats_tab: usize,
     help_scroll: usize,
     phred_range: PhredRange,
     stats: Arc<Mutex<FastqStats>>,
@@ -637,6 +638,7 @@ impl TuiViewer {
             orientation: ReadOrientation::AsIs,
             show_translation: false,
             stats_scroll: 0,
+            stats_tab: 0,
             help_scroll: 0,
             phred_range: PhredRange::Default,
             stats: Arc::new(Mutex::new(FastqStats::default())),
@@ -1532,6 +1534,12 @@ impl TuiViewer {
                         self.show_stats = !self.show_stats;
                         self.stats_scroll = 0; // Reset scroll when toggling
                     }
+                    Key::Char('\t') => {
+                        if self.show_stats && self.is_paired {
+                            self.stats_tab = (self.stats_tab + 1) % 2;
+                            self.stats_scroll = 0;
+                        }
+                    }
                     Key::Char('p') => {
                         self.show_quality = !self.show_quality;
                     }
@@ -2044,14 +2052,18 @@ impl TuiViewer {
 
             // If showing stats or help, use full screen for them
             if show_stats {
-                let stats_lock = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+                // Select stats based on active tab
+                let (stats_lock, label) = if self.is_paired && self.stats_tab == 1 {
+                    (self.stats_r2.lock().unwrap_or_else(|e| e.into_inner()), "R2")
+                } else {
+                    (self.stats.lock().unwrap_or_else(|e| e.into_inner()), "R1")
+                };
 
                 // Calculate layout for stats blocks
                 let (title_area, main_areas) = calculate_stats_layout(full_area);
 
-                // Title
+                // Tab bar + title
                 let is_processing = stats_lock.processed_reads > 0;
-
                 let status_indicator = if is_processing && !stats_lock.scanned_all {
                     "..."
                 } else if stats_lock.scanned_all {
@@ -2060,17 +2072,34 @@ impl TuiViewer {
                     "[stalled]"
                 };
 
-                let title = Line::from(Span::styled(
-                    format!("FASTQ Statistics {}", status_indicator),
-                    Style::default(),
-                ));
-                f.render_widget(title, title_area);
+                let tab_bar = if self.is_paired {
+                    let r1_tab = if self.stats_tab == 0 {
+                        Span::styled(" [R1] ", Style::default().fg(Color::White).bg(Color::DarkGray))
+                    } else {
+                        Span::styled("  R1  ", Style::default().fg(Color::DarkGray))
+                    };
+                    let r2_tab = if self.stats_tab == 1 {
+                        Span::styled(" [R2] ", Style::default().fg(Color::White).bg(Color::DarkGray))
+                    } else {
+                        Span::styled("  R2  ", Style::default().fg(Color::DarkGray))
+                    };
+                    Line::from(vec![
+                        r1_tab,
+                        Span::raw("  "),
+                        r2_tab,
+                        Span::raw(format!("  FASTQ Statistics ({}) {}", label, status_indicator)),
+                    ])
+                } else {
+                    Line::from(Span::styled(
+                        format!("FASTQ Statistics {}", status_indicator),
+                        Style::default(),
+                    ))
+                };
+                f.render_widget(tab_bar, title_area);
 
                 // Basic stats block
                 if let Some(basic_area) = main_areas.first().and_then(|areas| areas.first()) {
                     let basic_stats_content = vec![
-                        // format the total reads with spaces for better readability for high numbers
-                        // eg. "Total reads: 1 234 567"
                         Line::from(format!(
                             "Total reads: {}",
                             stats_lock.total_reads.to_formatted_string(&Locale::en)
@@ -2233,6 +2262,9 @@ impl TuiViewer {
                     Line::from("Statistics Panel:"),
                     Line::from(
                         " Displays read statistics, quality histograms, and adapter contamination",
+                    ),
+                    Line::from(
+                        " In paired mode, TAB switches between R1 and R2 stats",
                     ),
                 ];
 
