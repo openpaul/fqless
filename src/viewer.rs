@@ -4,8 +4,8 @@ use crate::color::ColorScheme;
 use crate::reader::FastqReader;
 use crate::search::{Pattern, SearchIndex};
 use crate::utils::{
-    calculate_record_lines, determine_min_max_phred, translate_frames_with_quality, PhredRange,
-    ReadOrientation,
+    calculate_record_lines, determine_min_max_phred, translate_frames,
+    translate_frames_with_quality, PhredRange, ReadOrientation,
 };
 use anyhow::Result;
 use bio::alphabets::dna;
@@ -85,7 +85,10 @@ impl Default for FastqStats {
 pub struct TuiViewer {
     terminal: Terminal<TermionBackend<AlternateScreen<RawTerminal<std::io::Stdout>>>>,
     buffer: DisplayBuffer,
+    buffer_r2: DisplayBuffer,
     file_path: String,
+    file_path_r2: String,
+    is_paired: bool,
     current_position: u64,
     horizontal_offset: usize,
     no_wrap: bool,
@@ -100,6 +103,9 @@ pub struct TuiViewer {
     stats: Arc<Mutex<FastqStats>>,
     stats_worker_handle: Option<JoinHandle<()>>,
     stats_stop_flag: Arc<AtomicBool>,
+    stats_r2: Arc<Mutex<FastqStats>>,
+    stats_worker_handle_r2: Option<JoinHandle<()>>,
+    stats_stop_flag_r2: Arc<AtomicBool>,
     color_scheme: ColorScheme,
     search_mode: bool,
     search_input: String,
@@ -113,6 +119,13 @@ pub struct TuiViewer {
     search_stop_flag: Arc<AtomicBool>,
     search_worker_scanned: Arc<AtomicU64>,
     search_worker_done: Arc<AtomicBool>,
+    search_index_r2: Arc<Mutex<SearchIndex>>,
+    search_indexed_up_to_r2: u64,
+    search_match_k_r2: u64,
+    search_worker_handle_r2: Option<JoinHandle<()>>,
+    search_stop_flag_r2: Arc<AtomicBool>,
+    search_worker_scanned_r2: Arc<AtomicU64>,
+    search_worker_done_r2: Arc<AtomicBool>,
 }
 
 /// Calculate the layout for the stats page with blocks
@@ -363,6 +376,58 @@ impl TuiViewer {
         )
     }
 
+    /// Calculate how many lines a paired record (two mates) takes on screen.
+    /// For paired mode, each "record" is a pair: 1 shared header + 1 R1 seq
+    /// (+ quality) + 1 R2 seq (+ quality), plus the gutter prefix.
+    fn calculate_paired_record_lines(
+        &self,
+        r1: &fastq::Record,
+        r2: &fastq::Record,
+        terminal_width: usize,
+    ) -> usize {
+        let header_lines = 1;
+
+        if self.show_translation {
+            // 6 frames for R1 + 6 frames for R2, each with gutter
+            let frames_r1 = translate_frames(r1.seq());
+            let frames_r2 = translate_frames(r2.seq());
+            let frame_lines: usize = frames_r1
+                .iter()
+                .chain(frames_r2.iter())
+                .map(|f| {
+                    if self.no_wrap {
+                        1
+                    } else {
+                        f.len().max(1).div_ceil(terminal_width.saturating_sub(2))
+                    }
+                })
+                .sum();
+            return header_lines + frame_lines;
+        }
+
+        let seq_len_r1 = r1.seq().len();
+        let seq_len_r2 = r2.seq().len();
+
+        let seq_lines_r1 = if self.no_wrap {
+            1
+        } else {
+            seq_len_r1.max(1).div_ceil(terminal_width.saturating_sub(2))
+        };
+        let seq_lines_r2 = if self.no_wrap {
+            1
+        } else {
+            seq_len_r2.max(1).div_ceil(terminal_width.saturating_sub(2))
+        };
+
+        let quality_lines = if self.show_quality {
+            seq_lines_r1 + seq_lines_r2
+        } else {
+            0
+        };
+
+        header_lines + seq_lines_r1 + seq_lines_r2 + quality_lines
+    }
+
     /// Calculate how many records fit on screen starting from given position
     /// Returns (records_that_fit, total_lines_used)
     fn calculate_records_per_page(
@@ -372,6 +437,14 @@ impl TuiViewer {
         terminal_width: usize,
     ) -> Result<(usize, usize)> {
         let available_height = terminal_height.saturating_sub(2); // Reserve space for header/footer
+
+        if self.is_paired {
+            return self.calculate_paired_records_per_page(
+                start_position,
+                available_height,
+                terminal_width,
+            );
+        }
 
         // Read from the already loaded buffer without triggering additional loads
         let reads_guard = self.buffer.reads.read().unwrap();
@@ -399,6 +472,40 @@ impl TuiViewer {
         Ok((records_count, lines_used))
     }
 
+    /// For paired mode: calculate how many pairs fit on screen
+    fn calculate_paired_records_per_page(
+        &self,
+        start_position: u64,
+        available_height: usize,
+        terminal_width: usize,
+    ) -> Result<(usize, usize)> {
+        let reads_guard = self.buffer.reads.read().unwrap();
+        let reads_guard_r2 = self.buffer_r2.reads.read().unwrap();
+        let start_idx = start_position as usize;
+
+        if start_idx >= reads_guard.len() || start_idx >= reads_guard_r2.len() {
+            return Ok((0, 0));
+        }
+
+        let mut lines_used = 0;
+        let mut pairs_count = 0;
+
+        for (r1, r2) in reads_guard
+            .iter()
+            .skip(start_idx)
+            .zip(reads_guard_r2.iter().skip(start_idx))
+        {
+            let pair_lines = self.calculate_paired_record_lines(r1, r2, terminal_width);
+            if lines_used + pair_lines > available_height {
+                break;
+            }
+            lines_used += pair_lines;
+            pairs_count += 1;
+        }
+
+        Ok((pairs_count, lines_used))
+    }
+
     /// Calculate page down: find next position that fills the screen
     fn calculate_page_down(&self, terminal_height: usize, terminal_width: usize) -> Result<u64> {
         let (records_per_page, _) = self.calculate_records_per_page(
@@ -417,6 +524,10 @@ impl TuiViewer {
     fn calculate_page_up(&self, terminal_height: usize, terminal_width: usize) -> Result<u64> {
         if self.current_position == 0 {
             return Ok(0);
+        }
+
+        if self.is_paired {
+            return self.calculate_paired_page_up(terminal_height, terminal_width);
         }
 
         // We need to work backwards to find where to start so that moving forward
@@ -443,7 +554,48 @@ impl TuiViewer {
         Ok(new_position)
     }
 
-    pub fn new(file_path: String) -> Result<Self> {
+    /// Page up for paired mode: count backwards in pairs
+    fn calculate_paired_page_up(
+        &self,
+        terminal_height: usize,
+        terminal_width: usize,
+    ) -> Result<u64> {
+        if self.current_position == 0 {
+            return Ok(0);
+        }
+
+        let mut lines_used = 0;
+        let mut pairs_to_move = 0;
+        let reads_guard = self.buffer.reads.read().unwrap();
+        let reads_guard_r2 = self.buffer_r2.reads.read().unwrap();
+        let start_idx = self.current_position as usize;
+
+        // Iterate backwards through pairs
+        for i in (0..start_idx).rev() {
+            if i >= reads_guard.len() || i >= reads_guard_r2.len() {
+                break;
+            }
+            let pair_lines = self.calculate_paired_record_lines(
+                &reads_guard[i],
+                &reads_guard_r2[i],
+                terminal_width,
+            );
+            if lines_used + pair_lines > terminal_height {
+                break;
+            }
+            lines_used += pair_lines;
+            pairs_to_move += 1;
+        }
+
+        let new_position = if pairs_to_move > 0 {
+            self.current_position.saturating_sub(pairs_to_move as u64)
+        } else {
+            0
+        };
+        Ok(new_position)
+    }
+
+    pub fn new(file_path: String, file_path_opt2: Option<String>) -> Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
         flag::register(SIGINT, Arc::clone(&running))?;
 
@@ -460,10 +612,22 @@ impl TuiViewer {
 
         let buffer = DisplayBuffer::new(&file_path)?;
 
+        let is_paired = file_path_opt2.is_some();
+        let file_path_2 = file_path_opt2.unwrap_or_default();
+        let buffer_r2 = if is_paired {
+            DisplayBuffer::new(&file_path_2)?
+        } else {
+            // Dummy buffer — not used when is_paired is false
+            DisplayBuffer::new(&file_path)?
+        };
+
         let mut viewer = TuiViewer {
             terminal,
             buffer,
+            buffer_r2,
             file_path: file_path.clone(),
+            file_path_r2: file_path_2,
+            is_paired,
             current_position: 0,
             horizontal_offset: 0,
             no_wrap: false,
@@ -478,6 +642,9 @@ impl TuiViewer {
             stats: Arc::new(Mutex::new(FastqStats::default())),
             stats_worker_handle: None,
             stats_stop_flag: Arc::new(AtomicBool::new(false)),
+            stats_r2: Arc::new(Mutex::new(FastqStats::default())),
+            stats_worker_handle_r2: None,
+            stats_stop_flag_r2: Arc::new(AtomicBool::new(false)),
             color_scheme: ColorScheme::RedGreen,
             search_mode: false,
             search_input: String::new(),
@@ -491,10 +658,20 @@ impl TuiViewer {
             search_stop_flag: Arc::new(AtomicBool::new(false)),
             search_worker_scanned: Arc::new(AtomicU64::new(0)),
             search_worker_done: Arc::new(AtomicBool::new(true)),
+            search_index_r2: Arc::new(Mutex::new(SearchIndex::new())),
+            search_indexed_up_to_r2: 0,
+            search_match_k_r2: 0,
+            search_worker_handle_r2: None,
+            search_stop_flag_r2: Arc::new(AtomicBool::new(false)),
+            search_worker_scanned_r2: Arc::new(AtomicU64::new(0)),
+            search_worker_done_r2: Arc::new(AtomicBool::new(true)),
         };
 
         // Start background statistics calculation
         viewer.start_stats_worker();
+        if viewer.is_paired {
+            viewer.start_stats_worker_r2();
+        }
 
         Ok(viewer)
     }
@@ -556,6 +733,59 @@ impl TuiViewer {
     // Reset stats to default (useful when changing phred range)
     fn reset_stats(&mut self) {
         if let Ok(mut stats_lock) = self.stats.lock() {
+            *stats_lock = FastqStats::default();
+        }
+    }
+
+    // Start background statistics calculation for R2 file
+    pub fn start_stats_worker_r2(&mut self) {
+        self.stop_stats_worker_r2();
+
+        self.stats_stop_flag_r2 = Arc::new(AtomicBool::new(false));
+
+        let stats_clone = Arc::clone(&self.stats_r2);
+        let phred_range = self.phred_range;
+        let stop_flag = Arc::clone(&self.stats_stop_flag_r2);
+        let reads = Arc::clone(&self.buffer_r2.reads);
+        let file_path = self.file_path_r2.clone();
+
+        let stats_for_counter = Arc::clone(&self.stats_r2);
+        let file_path_for_counter = file_path.clone();
+        let stop_flag_for_counter = Arc::clone(&self.stats_stop_flag_r2);
+        thread::spawn(move || {
+            if let Err(e) = Self::count_reads_fast(
+                stats_for_counter,
+                file_path_for_counter.as_str(),
+                stop_flag_for_counter,
+            ) {
+                eprintln!("Read counting error (R2): {}", e);
+            }
+        });
+
+        let handle = thread::spawn(move || {
+            if let Err(e) = Self::calculate_stats_background(
+                stats_clone,
+                file_path.as_str(),
+                reads,
+                phred_range,
+                stop_flag,
+            ) {
+                eprintln!("Stats calculation error (R2): {}", e);
+            }
+        });
+
+        self.stats_worker_handle_r2 = Some(handle);
+    }
+
+    fn stop_stats_worker_r2(&mut self) {
+        if let Some(handle) = self.stats_worker_handle_r2.take() {
+            self.stats_stop_flag_r2.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+        }
+    }
+
+    fn reset_stats_r2(&mut self) {
+        if let Ok(mut stats_lock) = self.stats_r2.lock() {
             *stats_lock = FastqStats::default();
         }
     }
@@ -625,20 +855,34 @@ impl TuiViewer {
         self.search_index.lock().unwrap().reset();
         self.search_indexed_up_to = 0;
         self.search_match_k = 0;
+        if self.is_paired {
+            self.search_index_r2.lock().unwrap().reset();
+            self.search_indexed_up_to_r2 = 0;
+            self.search_match_k_r2 = 0;
+        }
         self.search_pattern = Some(pattern);
         self.index_loaded_records();
         self.start_search_worker();
+        if self.is_paired {
+            self.start_search_worker_r2();
+        }
     }
 
     /// Clear the active search and stop the look-ahead worker.
     fn clear_search(&mut self) {
         self.stop_search_worker();
+        self.stop_search_worker_r2();
         self.search_pattern = None;
         self.search_query.clear();
         self.search_include_rc = true;
         self.search_index.lock().unwrap().reset();
         self.search_indexed_up_to = 0;
         self.search_match_k = 0;
+        if self.is_paired {
+            self.search_index_r2.lock().unwrap().reset();
+            self.search_indexed_up_to_r2 = 0;
+            self.search_match_k_r2 = 0;
+        }
     }
 
     /// Scan newly loaded records on the main thread and mark matches in the
@@ -646,6 +890,9 @@ impl TuiViewer {
     fn index_loaded_records(&mut self) {
         let Some(pattern) = self.search_pattern.clone() else {
             self.search_indexed_up_to = self.buffer.reads.read().unwrap().len() as u64;
+            if self.is_paired {
+                self.search_indexed_up_to_r2 = self.buffer_r2.reads.read().unwrap().len() as u64;
+            }
             return;
         };
         let reads = self.buffer.reads.read().unwrap();
@@ -657,6 +904,18 @@ impl TuiViewer {
             }
         }
         self.search_indexed_up_to = len;
+
+        if self.is_paired {
+            let reads_r2 = self.buffer_r2.reads.read().unwrap();
+            let len_r2 = reads_r2.len() as u64;
+            let mut index_r2 = self.search_index_r2.lock().unwrap();
+            for record_idx in self.search_indexed_up_to_r2..len_r2 {
+                if pattern.has_match(reads_r2[record_idx as usize].seq()) {
+                    index_r2.set(record_idx);
+                }
+            }
+            self.search_indexed_up_to_r2 = len_r2;
+        }
     }
 
     /// Jump to a record index, streaming forward if it is not loaded yet.
@@ -664,6 +923,10 @@ impl TuiViewer {
         self.current_position = record;
         self.buffer
             .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+        if self.is_paired {
+            self.buffer_r2
+                .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+        }
         let len = self.buffer.reads.read().unwrap().len() as u64;
         if len > 0 && self.current_position >= len {
             self.current_position = len - 1;
@@ -672,11 +935,16 @@ impl TuiViewer {
     }
 
     /// Move to the next (or previous) matching record relative to the current
-    /// position. Returns Ok(false) if no further match is known.
+    /// position. In paired mode, a match in either R1 or R2 counts.
     fn next_match(&mut self, forward: bool) -> Result<()> {
         if self.search_pattern.is_none() {
             return Ok(());
         }
+
+        if self.is_paired {
+            return self.next_match_paired(forward);
+        }
+
         let index = self.search_index.lock().unwrap();
         let target = if forward {
             index.next(self.current_position + 1)
@@ -687,6 +955,41 @@ impl TuiViewer {
         drop(index);
         if let Some(m) = target {
             self.search_match_k = k.unwrap_or(0);
+            self.jump_to_record(m)?;
+        }
+        Ok(())
+    }
+
+    /// Paired next/prev match: a match in either R1 or R2 counts.
+    fn next_match_paired(&mut self, forward: bool) -> Result<()> {
+        let index = self.search_index.lock().unwrap();
+        let index_r2 = self.search_index_r2.lock().unwrap();
+
+        // Build a combined bitmap: pair matches if either R1 or R2 matches
+        let max_idx = std::cmp::max(
+            self.buffer.reads.read().unwrap().len() as u64,
+            self.buffer_r2.reads.read().unwrap().len() as u64,
+        );
+        let mut combined = SearchIndex::new();
+        for i in 0..max_idx {
+            if index.test(i) || index_r2.test(i) {
+                combined.set(i);
+            }
+        }
+
+        let target = if forward {
+            combined.next(self.current_position + 1)
+        } else {
+            combined.prev(self.current_position)
+        };
+        let k = target.map(|m| combined.count_up_to(m));
+        drop(index_r2);
+        drop(index);
+
+        if let Some(m) = target {
+            self.search_match_k = k.unwrap_or(0);
+            // Also update R2 match count estimate
+            self.search_match_k_r2 = k.unwrap_or(0);
             self.jump_to_record(m)?;
         }
         Ok(())
@@ -729,6 +1032,43 @@ impl TuiViewer {
     fn stop_search_worker(&mut self) {
         if let Some(handle) = self.search_worker_handle.take() {
             self.search_stop_flag.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+        }
+    }
+
+    fn start_search_worker_r2(&mut self) {
+        self.stop_search_worker_r2();
+        let Some(pattern) = self.search_pattern.clone() else {
+            return;
+        };
+        if self.file_path_r2 == "-" || self.file_path_r2.is_empty() {
+            self.search_worker_done_r2.store(true, Ordering::SeqCst);
+            return;
+        }
+
+        self.search_stop_flag_r2 = Arc::new(AtomicBool::new(false));
+        self.search_worker_done_r2.store(false, Ordering::SeqCst);
+        self.search_worker_scanned_r2.store(0, Ordering::SeqCst);
+
+        let index = Arc::clone(&self.search_index_r2);
+        let scanned = Arc::clone(&self.search_worker_scanned_r2);
+        let done = Arc::clone(&self.search_worker_done_r2);
+        let stop_flag = Arc::clone(&self.search_stop_flag_r2);
+        let file_path = self.file_path_r2.clone();
+
+        let handle = thread::spawn(move || {
+            if let Err(e) =
+                Self::search_background(&pattern, &file_path, index, scanned, done, stop_flag)
+            {
+                eprintln!("Search error (R2): {}", e);
+            }
+        });
+        self.search_worker_handle_r2 = Some(handle);
+    }
+
+    fn stop_search_worker_r2(&mut self) {
+        if let Some(handle) = self.search_worker_handle_r2.take() {
+            self.search_stop_flag_r2.store(true, Ordering::SeqCst);
             let _ = handle.join();
         }
     }
@@ -1109,9 +1449,13 @@ impl TuiViewer {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        // Load initial record
+        // Load initial records
         self.buffer
             .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+        if self.is_paired {
+            self.buffer_r2
+                .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+        }
 
         // Determine where to read keyboard input from:
         // - If reading from a file, stdin is available for keyboard input
@@ -1224,9 +1568,13 @@ impl TuiViewer {
                             PhredRange::Illumina1_5 => PhredRange::Default,
                             PhredRange::Default => PhredRange::Solexa,
                         };
-                        // Reset stats and restart worker with new phred range
+                        // Reset stats and restart workers with new phred range
                         self.reset_stats();
                         self.start_stats_worker();
+                        if self.is_paired {
+                            self.reset_stats_r2();
+                            self.start_stats_worker_r2();
+                        }
                     }
                     Key::Left => {
                         if self.no_wrap
@@ -1251,6 +1599,10 @@ impl TuiViewer {
                             self.current_position += 1;
                             self.buffer
                                 .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+                            if self.is_paired {
+                                self.buffer_r2
+                                    .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+                            }
                             // if records are empty or we reached the end, don't go further
                             if self.current_position
                                 >= self.buffer.reads.read().unwrap().len() as u64
@@ -1283,6 +1635,10 @@ impl TuiViewer {
                             self.current_position = new_position;
                             self.buffer
                                 .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+                            if self.is_paired {
+                                self.buffer_r2
+                                    .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+                            }
                         }
                     }
                     Key::PageUp | Key::Char('K') => {
@@ -1337,6 +1693,16 @@ impl TuiViewer {
                 if worker_finished {
                     self.start_stats_worker();
                 }
+
+                if self.is_paired {
+                    let worker_finished_r2 = self
+                        .stats_worker_handle_r2
+                        .as_ref()
+                        .is_none_or(|h| h.is_finished());
+                    if worker_finished_r2 {
+                        self.start_stats_worker_r2();
+                    }
+                }
                 last_stats_update = 0;
             }
         }
@@ -1360,131 +1726,263 @@ impl TuiViewer {
         // Prepare content for main area
         let mut prepared_lines = Vec::new();
 
-        // Calculate available space first
         let available_height = terminal_size.height.saturating_sub(2) as usize;
-        // assuming 2 lines for each record as minimum
         let max_visible = available_height / 2;
-        let records = self
-            .buffer
-            .get_window(self.current_position, max_visible + 5)?; // +5 to ensure we have enough lines loaded
-                                                                  // print current position and horizontal offset for debug
 
-        //for i in 0..max_visible {
-        for record in records.iter() {
-            // remove @ from the ID if it exists
-            let name = if let Some(desc) = record.desc() {
-                format!("{} {}", record.id(), desc)
-            } else {
-                record.id().to_string()
-            };
-            // Header line in cyan
-            prepared_lines.push(Line::from(Span::styled(name.to_string(), Style::default())));
+        if self.is_paired {
+            // --- PAIRED MODE: interleaved R1/R2 with gutter bar ---
+            let records_r1 = self
+                .buffer
+                .get_window(self.current_position, max_visible + 5)?;
+            let records_r2 = self
+                .buffer_r2
+                .get_window(self.current_position, max_visible + 5)?;
+            for (r1, r2) in records_r1.iter().zip(records_r2.iter()) {
+                let name = if let Some(desc) = r1.desc() {
+                    format!("{} {}", r1.id(), desc)
+                } else {
+                    r1.id().to_string()
+                };
+                prepared_lines.push(Line::from(Span::styled(name, Style::default())));
 
-            let (oriented_seq, oriented_qual) = self.oriented_seq_qual(record);
+                let (seq1, qual1) = self.oriented_seq_qual(r1);
+                let (seq2, qual2) = self.oriented_seq_qual(r2);
 
-            if self.show_translation {
-                // 6-frame translation: one line per reading frame, colored by
-                // the effective quality of the amino acid. Amino acid search
-                // matches are highlighted in yellow.
-                let frames = translate_frames_with_quality(
-                    &oriented_seq,
-                    &oriented_qual,
-                    self.phred_range.base_phred(),
-                );
-                let highlight = self.highlight_pattern();
-                // Left-pad the labels so the amino acid columns line up
-                let labels: Vec<String> = frames
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| {
-                        if i < 3 {
-                            format!("  F{}: ", i + 1)
+                if self.show_translation {
+                    let frames1 =
+                        translate_frames_with_quality(&seq1, &qual1, self.phred_range.base_phred());
+                    let frames2 =
+                        translate_frames_with_quality(&seq2, &qual2, self.phred_range.base_phred());
+                    let highlight = self.highlight_pattern();
+                    let labels: Vec<String> = (0..6)
+                        .map(|i| {
+                            if i < 3 {
+                                format!("F{}: ", i + 1)
+                            } else {
+                                format!("F{} (rc): ", i + 1)
+                            }
+                        })
+                        .collect();
+                    let label_width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+
+                    for (i, (frame, scores)) in frames1.iter().enumerate() {
+                        let label = format!("{:<width$}1:\u{00a0}", labels[i], width = label_width);
+                        let (vs, ve) = if no_wrap {
+                            let s = horizontal_offset.min(frame.len());
+                            (s, (s + terminal_width.saturating_sub(4)).min(frame.len()))
                         } else {
-                            format!("  F{} (rc): ", i + 1)
+                            (0, frame.len())
+                        };
+                        let visible = &frame.as_bytes()[vs..ve];
+                        let v_scores = &scores[vs..ve];
+                        let ranges = highlight
+                            .as_ref()
+                            .map(|p| p.find_peptide_matches(frame.as_bytes()))
+                            .unwrap_or_default();
+                        let mut spans =
+                            vec![Span::styled(label, Style::default().fg(Color::DarkGray))];
+                        let mut pos = 0;
+                        for (start, end) in &ranges {
+                            let s = (*start).max(vs);
+                            let e = (*end).min(ve);
+                            if s >= e {
+                                continue;
+                            }
+                            for (k, &ch) in visible[pos..s - vs].iter().enumerate() {
+                                spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                            }
+                            for &ch in &visible[s - vs..e - vs] {
+                                spans.push(self.aa_span(ch, 0, true));
+                            }
+                            pos = e - vs;
                         }
-                    })
-                    .collect();
-                let label_width = labels
-                    .iter()
-                    .map(|label| label.chars().count())
-                    .max()
-                    .unwrap_or(0);
-                for (i, (frame, scores)) in frames.iter().enumerate() {
-                    let label = format!("{:<width$}", labels[i], width = label_width);
-                    let (visible_start, visible_end) = if no_wrap {
-                        let start = horizontal_offset.min(frame.len());
-                        (
-                            start,
-                            (start + terminal_width.saturating_sub(1)).min(frame.len()),
-                        )
-                    } else {
-                        (0, frame.len())
-                    };
-                    let visible = &frame.as_bytes()[visible_start..visible_end];
-                    let visible_scores = &scores[visible_start..visible_end];
-                    // Amino acid frames are ASCII, so byte offsets line up
-                    // with columns.
-                    let ranges: Vec<(usize, usize)> = highlight
-                        .as_ref()
-                        .map(|p| p.find_peptide_matches(frame.as_bytes()))
-                        .unwrap_or_default();
-                    let mut spans = vec![Span::styled(label, Style::default().fg(Color::DarkGray))];
-                    let mut pos = 0;
-                    for (start, end) in &ranges {
-                        let s = (*start).max(visible_start);
-                        let e = (*end).min(visible_end);
-                        if s >= e {
-                            continue;
+                        for (k, &ch) in visible[pos..].iter().enumerate() {
+                            spans.push(self.aa_span(ch, v_scores[pos + k], false));
                         }
-                        for (k, &ch) in visible[pos..s - visible_start].iter().enumerate() {
-                            spans.push(self.aa_span(ch, visible_scores[pos + k], false));
-                        }
-                        for &ch in &visible[s - visible_start..e - visible_start] {
-                            spans.push(self.aa_span(ch, 0, true));
-                        }
-                        pos = e - visible_start;
+                        prepared_lines.push(Line::from(spans));
                     }
-                    for (k, &ch) in visible[pos..].iter().enumerate() {
-                        spans.push(self.aa_span(ch, visible_scores[pos + k], false));
+                    for (i, (frame, scores)) in frames2.iter().enumerate() {
+                        let label = format!("{:<width$}2:\u{00a0}", labels[i], width = label_width);
+                        let (vs, ve) = if no_wrap {
+                            let s = horizontal_offset.min(frame.len());
+                            (s, (s + terminal_width.saturating_sub(4)).min(frame.len()))
+                        } else {
+                            (0, frame.len())
+                        };
+                        let visible = &frame.as_bytes()[vs..ve];
+                        let v_scores = &scores[vs..ve];
+                        let ranges = highlight
+                            .as_ref()
+                            .map(|p| p.find_peptide_matches(frame.as_bytes()))
+                            .unwrap_or_default();
+                        let mut spans =
+                            vec![Span::styled(label, Style::default().fg(Color::DarkGray))];
+                        let mut pos = 0;
+                        for (start, end) in &ranges {
+                            let s = (*start).max(vs);
+                            let e = (*end).min(ve);
+                            if s >= e {
+                                continue;
+                            }
+                            for (k, &ch) in visible[pos..s - vs].iter().enumerate() {
+                                spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                            }
+                            for &ch in &visible[s - vs..e - vs] {
+                                spans.push(self.aa_span(ch, 0, true));
+                            }
+                            pos = e - vs;
+                        }
+                        for (k, &ch) in visible[pos..].iter().enumerate() {
+                            spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                        }
+                        prepared_lines.push(Line::from(spans));
                     }
-                    prepared_lines.push(Line::from(spans));
+                    continue;
                 }
-                continue;
+
+                // R1 sequence
+                let (vs1, vq1) = if no_wrap {
+                    let s = horizontal_offset.min(seq1.len());
+                    let e = (s + terminal_width.saturating_sub(3)).min(seq1.len());
+                    (&seq1[s..e], &qual1[s.min(qual1.len())..e.min(qual1.len())])
+                } else {
+                    (&seq1[..], &qual1[..])
+                };
+                let prefix_r1 = Span::styled("1:\u{00a0}", Style::default());
+                let mut r1s = vec![prefix_r1];
+                r1s.extend(if !self.show_quality {
+                    self.colorize_sequence(vs1, vq1)
+                } else {
+                    self.raw_sequence_with_highlight(vs1)
+                });
+                prepared_lines.push(Line::from(r1s));
+                if self.show_quality {
+                    let mut r1q = vec![Span::styled("1:\u{00a0}", Style::default())];
+                    r1q.extend(self.colorize_sequence(vq1, vq1));
+                    prepared_lines.push(Line::from(r1q));
+                }
+
+                // R2 sequence
+                let (vs2, vq2) = if no_wrap {
+                    let s = horizontal_offset.min(seq2.len());
+                    let e = (s + terminal_width.saturating_sub(3)).min(seq2.len());
+                    (&seq2[s..e], &qual2[s.min(qual2.len())..e.min(qual2.len())])
+                } else {
+                    (&seq2[..], &qual2[..])
+                };
+                let mut r2s = vec![Span::styled("2:\u{00a0}", Style::default())];
+                r2s.extend(if !self.show_quality {
+                    self.colorize_sequence(vs2, vq2)
+                } else {
+                    self.raw_sequence_with_highlight(vs2)
+                });
+                prepared_lines.push(Line::from(r2s));
+                if self.show_quality {
+                    let mut r2q = vec![Span::styled("2:\u{00a0}", Style::default())];
+                    r2q.extend(self.colorize_sequence(vq2, vq2));
+                    prepared_lines.push(Line::from(r2q));
+                }
             }
+        } else {
+            // --- SINGLE FILE MODE ---
+            let records = self
+                .buffer
+                .get_window(self.current_position, max_visible + 5)?;
+            for record in records.iter() {
+                let name = if let Some(desc) = record.desc() {
+                    format!("{} {}", record.id(), desc)
+                } else {
+                    record.id().to_string()
+                };
+                prepared_lines.push(Line::from(Span::styled(name, Style::default())));
+                let (oriented_seq, oriented_qual) = self.oriented_seq_qual(record);
 
-            // Handle sequence display based on wrap mode
-            let visible_sequence = if no_wrap {
-                let start = horizontal_offset.min(oriented_seq.len());
-                let end = (start + terminal_width.saturating_sub(1)).min(oriented_seq.len());
-                &oriented_seq[start..end]
-            } else {
-                &oriented_seq
-            };
+                if self.show_translation {
+                    let frames = translate_frames_with_quality(
+                        &oriented_seq,
+                        &oriented_qual,
+                        self.phred_range.base_phred(),
+                    );
+                    let highlight = self.highlight_pattern();
+                    let labels: Vec<String> = frames
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| {
+                            if i < 3 {
+                                format!("  F{}: ", i + 1)
+                            } else {
+                                format!("  F{} (rc): ", i + 1)
+                            }
+                        })
+                        .collect();
+                    let lw = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+                    for (i, (frame, scores)) in frames.iter().enumerate() {
+                        let label = format!("{:<width$}", labels[i], width = lw);
+                        let (vs, ve) = if no_wrap {
+                            let s = horizontal_offset.min(frame.len());
+                            (s, (s + terminal_width.saturating_sub(1)).min(frame.len()))
+                        } else {
+                            (0, frame.len())
+                        };
+                        let visible = &frame.as_bytes()[vs..ve];
+                        let v_scores = &scores[vs..ve];
+                        let ranges = highlight
+                            .as_ref()
+                            .map(|p| p.find_peptide_matches(frame.as_bytes()))
+                            .unwrap_or_default();
+                        let mut spans =
+                            vec![Span::styled(label, Style::default().fg(Color::DarkGray))];
+                        let mut pos = 0;
+                        for (start, end) in &ranges {
+                            let s = (*start).max(vs);
+                            let e = (*end).min(ve);
+                            if s >= e {
+                                continue;
+                            }
+                            for (k, &ch) in visible[pos..s - vs].iter().enumerate() {
+                                spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                            }
+                            for &ch in &visible[s - vs..e - vs] {
+                                spans.push(self.aa_span(ch, 0, true));
+                            }
+                            pos = e - vs;
+                        }
+                        for (k, &ch) in visible[pos..].iter().enumerate() {
+                            spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                        }
+                        prepared_lines.push(Line::from(spans));
+                    }
+                    continue;
+                }
 
-            let visible_quality = if no_wrap && oriented_qual.len() > horizontal_offset {
-                let quality_end =
-                    (horizontal_offset + terminal_width.saturating_sub(1)).min(oriented_qual.len());
-                &oriented_qual[horizontal_offset..quality_end]
-            } else {
-                &oriented_qual
-            };
-
-            let sequence_spans = if !self.show_quality {
-                self.colorize_sequence(visible_sequence, visible_quality)
-            } else {
-                self.raw_sequence_with_highlight(visible_sequence)
-            };
-
-            prepared_lines.push(Line::from(sequence_spans));
-
-            // if show_quality is true, add quality line showing the quality characters
-            if self.show_quality {
-                let quality_spans = self.colorize_sequence(visible_quality, visible_quality);
-                prepared_lines.push(Line::from(quality_spans));
+                let (vs, vq) = if no_wrap {
+                    let s = horizontal_offset.min(oriented_seq.len());
+                    let e = (s + terminal_width.saturating_sub(1)).min(oriented_seq.len());
+                    (
+                        &oriented_seq[s..e],
+                        &oriented_qual[s.min(oriented_qual.len())..e.min(oriented_qual.len())],
+                    )
+                } else {
+                    (&oriented_seq[..], &oriented_qual[..])
+                };
+                let ss = if !self.show_quality {
+                    self.colorize_sequence(vs, vq)
+                } else {
+                    self.raw_sequence_with_highlight(vs)
+                };
+                prepared_lines.push(Line::from(ss));
+                if self.show_quality {
+                    prepared_lines.push(Line::from(self.colorize_sequence(vq, vq)));
+                }
             }
         }
 
         let wrap_status = if no_wrap { "NO-WRAP" } else { "WRAP" };
+        let mode_display = if self.is_paired {
+            "PAIRED"
+        } else {
+            wrap_status
+        };
 
         let help_text = if no_wrap {
             "↑/k: Up | ↓/j: Down | ←/→: Scroll | PgUp/PgDn: Page | S: Wrap | /: Search | s: Stats | c: Colors | q: Quit"
@@ -1791,16 +2289,26 @@ impl TuiViewer {
                 .and_then(|name| name.to_str())
                 .unwrap_or(&self.file_path);
 
+            let file_label = if self.is_paired {
+                let fname2 = std::path::Path::new(&self.file_path_r2)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&self.file_path_r2);
+                format!("{} | {}", filename, fname2)
+            } else {
+                filename.to_string()
+            };
+
             let status = Paragraph::new(format!(
                 "File: {} | Records: {} | Pos: {} | {} | {} | {} {}-{}{}{}",
-                filename,
+                file_label,
                 self.stats
                     .lock()
                     .unwrap()
                     .total_reads
                     .to_formatted_string(&Locale::en),
                 current_position,
-                wrap_status,
+                mode_display,
                 self.orientation.name(),
                 self.phred_range.name(),
                 self.phred_range.base_phred(),
@@ -1839,7 +2347,9 @@ impl TuiViewer {
 impl Drop for TuiViewer {
     fn drop(&mut self) {
         self.stop_stats_worker();
+        self.stop_stats_worker_r2();
         self.stop_search_worker();
+        self.stop_search_worker_r2();
 
         let _ = write!(
             self.terminal.backend_mut(),

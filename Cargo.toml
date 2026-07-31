@@ -2,6 +2,7 @@
 name = "fqless"
 version = "2.2.0"
 edition = "2021"
+license = "GPL-2.0-or-later"
 
 [dependencies]
 termion = "4.0"  

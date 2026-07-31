@@ -42,7 +42,6 @@ impl SearchIndex {
         }
     }
 
-    #[cfg(test)]
     pub fn test(&self, record: u64) -> bool {
         let word = (record / 64) as usize;
         let bit = record % 64;
