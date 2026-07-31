@@ -33,7 +33,7 @@ use std::{fs::File, io::stdout};
 use std::{io::Write, os::fd::BorrowedFd};
 use termion::{
     event::Key,
-    input::{MouseTerminal, TermRead},
+    input::TermRead,
     raw::{IntoRawMode, RawTerminal},
     screen::{AlternateScreen, IntoAlternateScreen},
 };
@@ -78,8 +78,7 @@ impl Default for FastqStats {
 }
 
 pub struct TuiViewer {
-    terminal:
-        Terminal<TermionBackend<AlternateScreen<MouseTerminal<RawTerminal<std::io::Stdout>>>>>,
+    terminal: Terminal<TermionBackend<AlternateScreen<RawTerminal<std::io::Stdout>>>>,
     buffer: DisplayBuffer,
     file_path: String,
     current_position: u64,
@@ -308,7 +307,7 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph<'_> {
 
     // Show top 3 most common adapters
     let mut adapter_pairs: Vec<_> = adapter_stats.adapters_detected.iter().collect();
-    adapter_pairs.sort_by(|a, b| b.1.count.cmp(&a.1.count));
+    adapter_pairs.sort_by_key(|(_, adapter_match)| std::cmp::Reverse(adapter_match.count));
 
     content.push(Line::from("Top adapters detected:"));
 
@@ -430,7 +429,6 @@ impl TuiViewer {
         }
 
         let stdout = stdout().into_raw_mode()?;
-        let stdout = MouseTerminal::from(stdout);
         let stdout = stdout.into_alternate_screen()?;
         let backend = TermionBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
