@@ -597,6 +597,17 @@ impl TuiViewer {
         }
     }
 
+    /// Build the search pattern for the current view: a nucleotide pattern
+    /// (with optional reverse complement) in the sequence view, a peptide
+    /// pattern in the 6-frame translation view.
+    fn build_search_pattern(&self) -> Option<Pattern> {
+        if self.show_translation {
+            Pattern::new_peptide(&self.search_query)
+        } else {
+            Pattern::new(&self.search_query, self.search_include_rc)
+        }
+    }
+
     /// (Re)build the active search pattern from the committed query, reset
     /// the index, index already-loaded records and start the look-ahead worker.
     fn apply_search_pattern(&mut self) {
@@ -604,7 +615,7 @@ impl TuiViewer {
             self.clear_search();
             return;
         }
-        let pattern = match Pattern::new(&self.search_query, self.search_include_rc) {
+        let pattern = match self.build_search_pattern() {
             Some(p) => p,
             None => {
                 self.clear_search();
@@ -990,10 +1001,15 @@ impl TuiViewer {
 
     /// The pattern to use for highlighting right now: while typing a new
     /// pattern in the search prompt it updates live, otherwise the committed
-    /// pattern applies.
+    /// pattern applies. The pattern is interpreted for the current view
+    /// (nucleotide vs. amino acid).
     fn highlight_pattern(&self) -> Option<Pattern> {
         if self.search_mode && !self.search_input.trim().is_empty() {
-            Pattern::new(self.search_input.trim(), self.search_include_rc)
+            if self.show_translation {
+                Pattern::new_peptide(self.search_input.trim())
+            } else {
+                Pattern::new(self.search_input.trim(), self.search_include_rc)
+            }
         } else {
             self.search_pattern.clone()
         }
@@ -1011,6 +1027,25 @@ impl TuiViewer {
             let quality_score = quality.saturating_sub(self.phred_range.base_phred());
             let color = self.color_scheme.quality_to_color(quality_score);
             Span::styled(char::from(base).to_string(), Style::default().fg(color))
+        }
+    }
+
+    /// Render an amino acid as either its quality color (stops in red) or the
+    /// search-match highlight (yellow background) when inside a match range.
+    /// Quality scores here are absolute (0-40), so no phred offset is applied.
+    fn aa_span<'a>(&self, ch: u8, quality: u8, highlighted: bool) -> Span<'a> {
+        if highlighted {
+            Span::styled(
+                char::from(ch).to_string(),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            )
+        } else {
+            let color = if ch == b'*' {
+                Color::Red
+            } else {
+                self.color_scheme.quality_to_color(quality)
+            };
+            Span::styled(char::from(ch).to_string(), Style::default().fg(color))
         }
     }
 
@@ -1140,7 +1175,7 @@ impl TuiViewer {
                         }
                     }
                     Key::Char('x') => {
-                        if self.search_pattern.is_some() {
+                        if self.search_pattern.is_some() && !self.show_translation {
                             self.search_include_rc = !self.search_include_rc;
                             self.apply_search_pattern();
                         }
@@ -1164,6 +1199,12 @@ impl TuiViewer {
                     Key::Char('t') => {
                         self.show_translation = !self.show_translation;
                         self.horizontal_offset = 0;
+                        // Reinterpret the active query for the new view:
+                        // nucleotide pattern when leaving, peptide pattern
+                        // when entering the 6-frame translation view.
+                        if self.search_pattern.is_some() {
+                            self.apply_search_pattern();
+                        }
                     }
                     Key::Char('h') => {
                         self.show_help = !self.show_help;
@@ -1343,12 +1384,14 @@ impl TuiViewer {
 
             if self.show_translation {
                 // 6-frame translation: one line per reading frame, colored by
-                // the effective quality of the amino acid
+                // the effective quality of the amino acid. Amino acid search
+                // matches are highlighted in yellow.
                 let frames = translate_frames_with_quality(
                     &oriented_seq,
                     &oriented_qual,
                     self.phred_range.base_phred(),
                 );
+                let highlight = self.highlight_pattern();
                 // Left-pad the labels so the amino acid columns line up
                 let labels: Vec<String> = frames
                     .iter()
@@ -1368,21 +1411,41 @@ impl TuiViewer {
                     .unwrap_or(0);
                 for (i, (frame, scores)) in frames.iter().enumerate() {
                     let label = format!("{:<width$}", labels[i], width = label_width);
-                    let (visible, visible_scores) = if no_wrap {
+                    let (visible_start, visible_end) = if no_wrap {
                         let start = horizontal_offset.min(frame.len());
-                        let end = (start + terminal_width.saturating_sub(1)).min(frame.len());
-                        (&frame[start..end], &scores[start..end])
+                        (
+                            start,
+                            (start + terminal_width.saturating_sub(1)).min(frame.len()),
+                        )
                     } else {
-                        (frame.as_str(), scores.as_slice())
+                        (0, frame.len())
                     };
+                    let visible = &frame.as_bytes()[visible_start..visible_end];
+                    let visible_scores = &scores[visible_start..visible_end];
+                    // Amino acid frames are ASCII, so byte offsets line up
+                    // with columns.
+                    let ranges: Vec<(usize, usize)> = highlight
+                        .as_ref()
+                        .map(|p| p.find_peptide_matches(frame.as_bytes()))
+                        .unwrap_or_default();
                     let mut spans = vec![Span::styled(label, Style::default().fg(Color::DarkGray))];
-                    for (ch, &quality) in visible.chars().zip(visible_scores.iter()) {
-                        let color = if ch == '*' {
-                            Color::Red
-                        } else {
-                            self.color_scheme.quality_to_color(quality)
-                        };
-                        spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+                    let mut pos = 0;
+                    for (start, end) in &ranges {
+                        let s = (*start).max(visible_start);
+                        let e = (*end).min(visible_end);
+                        if s >= e {
+                            continue;
+                        }
+                        for (k, &ch) in visible[pos..s - visible_start].iter().enumerate() {
+                            spans.push(self.aa_span(ch, visible_scores[pos + k], false));
+                        }
+                        for &ch in &visible[s - visible_start..e - visible_start] {
+                            spans.push(self.aa_span(ch, 0, true));
+                        }
+                        pos = e - visible_start;
+                    }
+                    for (k, &ch) in visible[pos..].iter().enumerate() {
+                        spans.push(self.aa_span(ch, visible_scores[pos + k], false));
                     }
                     prepared_lines.push(Line::from(spans));
                 }
@@ -1431,7 +1494,17 @@ impl TuiViewer {
 
         let search_status = if self.search_pattern.is_some() {
             let count = self.search_index.lock().unwrap().count();
-            let rc = if self.search_include_rc { "+RC" } else { "-RC" };
+            let mode = match &self.search_pattern {
+                Some(p) if p.is_peptide() => "aa",
+                Some(_) => {
+                    if self.search_include_rc {
+                        "+RC"
+                    } else {
+                        "-RC"
+                    }
+                }
+                None => "",
+            };
             let scanning = if self.search_worker_done.load(Ordering::SeqCst) {
                 String::new()
             } else {
@@ -1443,7 +1516,7 @@ impl TuiViewer {
                 )
             };
             format!(
-                " | /{} {rc} {}/{}{}",
+                " | /{} {mode} {}/{}{}",
                 self.search_query, self.search_match_k, count, scanning
             )
         } else {
@@ -1452,6 +1525,8 @@ impl TuiViewer {
 
         let footer = if self.search_mode {
             format!("/{}▌", self.search_input)
+        } else if self.search_pattern.as_ref().is_some_and(|p| p.is_peptide()) {
+            format!("{} | n/N: prev/next | /: Search | q: Quit", help_text)
         } else if self.search_pattern.is_some() {
             format!(
                 "{} | n/N: prev/next | x: {} | /: Search | q: Quit",
@@ -1643,9 +1718,10 @@ impl TuiViewer {
                     Line::from(
                         "  /          - Search (exact, case-insensitive, matches in yellow)",
                     ),
+                    Line::from("              In translation view: amino acid sequence (e.g. CAR)"),
                     Line::from("  n          - Jump to next match"),
                     Line::from("  N          - Jump to previous match"),
-                    Line::from("  x          - Toggle reverse-complement search"),
+                    Line::from("  x          - Toggle reverse-complement search (sequence view)"),
                     Line::from("  Esc        - Cancel search"),
                     Line::from("  Enter      - Commit search and jump to first match"),
                     Line::from(""),

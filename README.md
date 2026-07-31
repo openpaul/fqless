@@ -45,7 +45,7 @@ cargo build --release
 - Shows number of reads and some basic statistics
 - Press `r` to cycle read orientation: as-is (`5'->3'`) or reverse complemented. Quality scores stay paired with their bases.
 - Press `t` to show all six reading frames translated to amino acids (stops shown in red as `*`).
-- Press `/` to search: matches are highlighted in yellow as you type. `n`/`N` jump to the next/previous match, and `x` toggles reverse-complement search (reads are unoriented, so by default a pattern also matches its reverse complement). Searches are exact and case-insensitive, and a background thread indexes the whole file (one bit per read) so you can jump to matches beyond what is loaded.
+- Press `/` to search: matches are highlighted in yellow as you type. `n`/`N` jump to the next/previous match, and `x` toggles reverse-complement search (reads are unoriented, so by default a pattern also matches its reverse complement). Searches are exact and case-insensitive, and a background thread indexes the whole file (one bit per read) so you can jump to matches beyond what is loaded. In the 6-frame translation view, `/` searches an amino acid sequence instead (e.g. `CAR` or `EVQ`), matched against all six reading frames.
 
 ## Statistics (press 's')
 

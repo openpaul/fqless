@@ -1,6 +1,8 @@
 use bio::alphabets::dna;
 use bio::pattern_matching::bom::BOM;
 
+use crate::utils::translate_frames;
+
 /// Bitmap of which records contain at least one search match. One bit per
 /// record, so memory use is independent of how frequent the pattern is.
 pub struct SearchIndex {
@@ -119,19 +121,28 @@ impl Default for SearchIndex {
     }
 }
 
-/// A case-insensitive exact-substring pattern, optionally searched together
-/// with its reverse complement. Reads are unoriented, so a motif may appear
-/// as either the literal pattern or its reverse complement in a read.
+/// A search query: either a nucleotide pattern for the sequence view or a
+/// peptide (single-letter amino acid) pattern for the 6-frame translation
+/// view. Both match case-insensitively.
 #[derive(Clone)]
-pub struct Pattern {
+pub enum Pattern {
+    Dna(DnaPattern),
+    Peptide(PeptidePattern),
+}
+
+/// A nucleotide pattern, optionally searched together with its reverse
+/// complement. Reads are unoriented, so a motif may appear as either the
+/// literal pattern or its reverse complement in a read.
+#[derive(Clone)]
+pub struct DnaPattern {
     literal: Vec<u8>,
     literal_bom: BOM,
     rc_bom: Option<BOM>,
 }
 
-impl Pattern {
-    /// Build a pattern from user input (leading/trailing whitespace is
-    /// trimmed). Returns None for empty input.
+impl DnaPattern {
+    /// Build a nucleotide pattern from user input (leading/trailing
+    /// whitespace is trimmed). Returns None for empty input.
     pub fn new(input: &str, include_rc: bool) -> Option<Self> {
         let input = input.trim();
         if input.is_empty() {
@@ -179,25 +190,123 @@ impl Pattern {
     /// contiguous ranges. Ranges are [start, end) byte offsets into `seq`.
     pub fn find_merged_matches(&self, seq: &[u8]) -> Vec<(usize, usize)> {
         let lc: Vec<u8> = seq.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let mut starts: Vec<usize> = self.literal_bom.find_all(&lc).collect();
+        let mut hits: Vec<(usize, usize)> = Vec::new();
+        for start in self.literal_bom.find_all(&lc) {
+            hits.push((start, start + self.literal.len()));
+        }
         if let Some(rc) = &self.rc_bom {
-            starts.extend(rc.find_all(&lc));
-        }
-        starts.sort_unstable();
-
-        let mut ranges: Vec<(usize, usize)> = Vec::new();
-        for start in starts {
-            let end = start + self.literal.len();
-            if let Some((_, last_end)) = ranges.last_mut() {
-                if start <= *last_end {
-                    *last_end = (*last_end).max(end);
-                    continue;
-                }
+            for start in rc.find_all(&lc) {
+                hits.push((start, start + self.literal.len()));
             }
-            ranges.push((start, end));
         }
-        ranges
+        merged_ranges(&mut hits)
     }
+}
+
+/// A peptide pattern (single-letter amino acid codes, e.g. "CAR") matched
+/// against translated reading frames.
+#[derive(Clone)]
+pub struct PeptidePattern {
+    pep: Vec<u8>,
+    bom: BOM,
+}
+
+impl PeptidePattern {
+    /// Build a peptide pattern from user input. Returns None for empty input.
+    pub fn new(input: &str) -> Option<Self> {
+        let input = input.trim();
+        if input.is_empty() {
+            return None;
+        }
+        let pep: Vec<u8> = input
+            .as_bytes()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        let bom = BOM::new(&pep);
+        Some(Self { pep, bom })
+    }
+
+    /// True if any occurrence of the peptide appears in the frame.
+    pub fn has_match(&self, frame: &[u8]) -> bool {
+        let lc: Vec<u8> = frame.iter().map(|b| b.to_ascii_lowercase()).collect();
+        self.bom.find_all(&lc).next().is_some()
+    }
+
+    /// Find all matches in a translated frame, merging overlapping and
+    /// adjacent hits into contiguous ranges. Ranges are [start, end) byte
+    /// offsets into the frame.
+    pub fn find_merged_matches(&self, frame: &[u8]) -> Vec<(usize, usize)> {
+        let lc: Vec<u8> = frame.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let mut hits: Vec<(usize, usize)> = Vec::new();
+        for start in self.bom.find_all(&lc) {
+            hits.push((start, start + self.pep.len()));
+        }
+        merged_ranges(&mut hits)
+    }
+}
+
+impl Pattern {
+    /// Build a nucleotide pattern (see [`DnaPattern::new`]).
+    pub fn new(input: &str, include_rc: bool) -> Option<Self> {
+        DnaPattern::new(input, include_rc).map(Pattern::Dna)
+    }
+
+    /// Build a peptide pattern for searching translated frames.
+    pub fn new_peptide(input: &str) -> Option<Self> {
+        PeptidePattern::new(input).map(Pattern::Peptide)
+    }
+
+    /// True if this is a peptide (amino acid) pattern.
+    pub fn is_peptide(&self) -> bool {
+        matches!(self, Pattern::Peptide(_))
+    }
+
+    /// True if any occurrence of the pattern appears in the nucleotide
+    /// record `seq`. Peptide patterns match when the peptide occurs in any of
+    /// the six reading frames (translation covers both strands, so record
+    /// orientation does not matter).
+    pub fn has_match(&self, seq: &[u8]) -> bool {
+        match self {
+            Pattern::Dna(p) => p.has_match(seq),
+            Pattern::Peptide(p) => translate_frames(seq)
+                .iter()
+                .any(|frame| p.has_match(frame.as_bytes())),
+        }
+    }
+
+    /// Find nucleotide matches in `seq` (empty for peptide patterns).
+    pub fn find_merged_matches(&self, seq: &[u8]) -> Vec<(usize, usize)> {
+        match self {
+            Pattern::Dna(p) => p.find_merged_matches(seq),
+            Pattern::Peptide(_) => Vec::new(),
+        }
+    }
+
+    /// Find peptide matches in a translated frame (empty for nucleotide
+    /// patterns).
+    pub fn find_peptide_matches(&self, frame: &[u8]) -> Vec<(usize, usize)> {
+        match self {
+            Pattern::Dna(_) => Vec::new(),
+            Pattern::Peptide(p) => p.find_merged_matches(frame),
+        }
+    }
+}
+
+/// Merge sorted hit ranges, combining overlapping or adjacent ranges.
+fn merged_ranges(hits: &mut Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    hits.sort_unstable();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in hits.drain(..) {
+        if let Some((_, last_end)) = ranges.last_mut() {
+            if start <= *last_end {
+                *last_end = (*last_end).max(end);
+                continue;
+            }
+        }
+        ranges.push((start, end));
+    }
+    ranges
 }
 
 #[cfg(test)]
@@ -347,5 +456,67 @@ mod tests {
     fn test_merged_matches_no_hits() {
         let p = Pattern::new("atgc", true).unwrap();
         assert!(p.find_merged_matches(b"ACGTACGT").is_empty());
+    }
+
+    #[test]
+    fn test_peptide_pattern_basic() {
+        // TGT GCT CGT -> C A R in frame 1.
+        let p = Pattern::new_peptide("CAR").unwrap();
+        assert!(p.is_peptide());
+        assert!(p.has_match(b"TGTGCTCGT"));
+        assert!(p.has_match(b"NNNTGTGCTCGTNNN"));
+        assert!(!p.has_match(b"ATGAAATAA")); // frames MK*, *KN, EN: no CAR
+    }
+
+    #[test]
+    fn test_peptide_pattern_case_insensitive() {
+        let p = Pattern::new_peptide("car").unwrap();
+        assert!(p.has_match(b"TGTGCTCGT"));
+        let q = Pattern::new_peptide("CAR").unwrap();
+        assert!(q.has_match(b"tgtgctcgt"));
+    }
+
+    #[test]
+    fn test_peptide_pattern_rc_strand() {
+        // Peptide present only in the reverse-complement frames still matches:
+        // rc(ACGAGCACA) = TGTGCTCGT -> CAR.
+        let p = Pattern::new_peptide("CAR").unwrap();
+        assert!(p.has_match(b"ACGAGCACA"));
+    }
+
+    #[test]
+    fn test_peptide_pattern_empty() {
+        assert!(Pattern::new_peptide("").is_none());
+        assert!(Pattern::new_peptide("   ").is_none());
+    }
+
+    #[test]
+    fn test_peptide_find_matches() {
+        let p = Pattern::new_peptide("CAR").unwrap();
+        assert_eq!(p.find_peptide_matches(b"CAR"), vec![(0, 3)]);
+        assert_eq!(
+            p.find_peptide_matches(b"XXCARYYCARZZ"),
+            vec![(2, 5), (7, 10)]
+        );
+        assert_eq!(p.find_peptide_matches(b"EVQ"), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn test_peptide_find_matches_overlap() {
+        let p = Pattern::new_peptide("AA").unwrap();
+        assert_eq!(p.find_peptide_matches(b"AAAA"), vec![(0, 4)]);
+    }
+
+    #[test]
+    fn test_dna_pattern_no_peptide_matches() {
+        let p = Pattern::new("atg", false).unwrap();
+        assert!(!p.is_peptide());
+        assert!(p.find_peptide_matches(b"M").is_empty());
+    }
+
+    #[test]
+    fn test_peptide_pattern_no_dna_matches() {
+        let p = Pattern::new_peptide("CAR").unwrap();
+        assert!(p.find_merged_matches(b"TGTGCTCGT").is_empty());
     }
 }
