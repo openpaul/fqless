@@ -3,7 +3,8 @@ use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
 use crate::reader::FastqReader;
 use crate::utils::{
-    calculate_record_lines, determine_min_max_phred, translate_frames, PhredRange, ReadOrientation,
+    calculate_record_lines, determine_min_max_phred, translate_frames_with_quality, PhredRange,
+    ReadOrientation,
 };
 use anyhow::Result;
 use bio::alphabets::dna;
@@ -1035,8 +1036,13 @@ impl TuiViewer {
             let (oriented_seq, oriented_qual) = self.oriented_seq_qual(record);
 
             if self.show_translation {
-                // 6-frame translation: one line per reading frame
-                let frames = translate_frames(&oriented_seq);
+                // 6-frame translation: one line per reading frame, colored by
+                // the effective quality of the amino acid
+                let frames = translate_frames_with_quality(
+                    &oriented_seq,
+                    &oriented_qual,
+                    self.phred_range.base_phred(),
+                );
                 // Left-pad the labels so the amino acid columns line up
                 let labels: Vec<String> = frames
                     .iter()
@@ -1054,18 +1060,22 @@ impl TuiViewer {
                     .map(|label| label.chars().count())
                     .max()
                     .unwrap_or(0);
-                for (i, frame) in frames.iter().enumerate() {
+                for (i, (frame, scores)) in frames.iter().enumerate() {
                     let label = format!("{:<width$}", labels[i], width = label_width);
-                    let visible = if no_wrap {
+                    let (visible, visible_scores) = if no_wrap {
                         let start = horizontal_offset.min(frame.len());
                         let end = (start + terminal_width.saturating_sub(1)).min(frame.len());
-                        &frame[start..end]
+                        (&frame[start..end], &scores[start..end])
                     } else {
-                        frame.as_str()
+                        (frame.as_str(), scores.as_slice())
                     };
                     let mut spans = vec![Span::styled(label, Style::default().fg(Color::DarkGray))];
-                    for ch in visible.chars() {
-                        let color = if ch == '*' { Color::Red } else { Color::White };
+                    for (ch, &quality) in visible.chars().zip(visible_scores.iter()) {
+                        let color = if ch == '*' {
+                            Color::Red
+                        } else {
+                            self.color_scheme.quality_to_color(quality)
+                        };
                         spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
                     }
                     prepared_lines.push(Line::from(spans));

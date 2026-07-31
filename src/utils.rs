@@ -118,36 +118,133 @@ fn base_index(base: u8) -> usize {
     }
 }
 
-fn translate_codon(first: u8, second: u8, third: u8) -> char {
+fn codon_index(first: u8, second: u8, third: u8) -> Option<usize> {
     let first = base_index(first);
     let second = base_index(second);
     let third = base_index(third);
     if first == 4 || second == 4 || third == 4 {
-        'X'
+        None
     } else {
-        CODON_TABLE[(first << 4) | (second << 2) | third]
+        Some((first << 4) | (second << 2) | third)
     }
 }
 
-/// Translate one reading frame of a nucleotide sequence into amino acids.
-/// Only complete codons are translated; a trailing partial codon is ignored.
-fn translate_frame(strand: &[u8], frame: usize) -> String {
+/// Per-codon position weights, packed two bits per position
+/// (w0<<4 | w1<<2 | w2). Each weight is the number of the three possible
+/// base substitutions at that position (out of 3) that change the amino
+/// acid. A weight of 0 marks a position that never affects the amino acid
+/// (e.g. the third base of four-fold degenerate codons). Indexed exactly
+/// like CODON_TABLE.
+const CODON_WEIGHTS: [u8; 64] = [
+    0x3e, 0x3e, 0x3e, 0x3e, 0x3c, 0x3c, 0x3c, 0x3c, 0x2e, 0x3e, 0x2e, 0x3e, 0x3d, 0x3d, 0x3f, 0x3d,
+    0x3e, 0x3e, 0x3e, 0x3e, 0x3c, 0x3c, 0x3c, 0x3c, 0x2c, 0x3c, 0x2c, 0x3c, 0x2c, 0x3c, 0x2c, 0x3c,
+    0x3e, 0x3e, 0x3e, 0x3e, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c,
+    0x3a, 0x3e, 0x3e, 0x3e, 0x3c, 0x3c, 0x3c, 0x3c, 0x3b, 0x3e, 0x3f, 0x3e, 0x2e, 0x3e, 0x2e, 0x3e,
+];
+
+/// Phred boost applied to a position based on how many of the three
+/// possible substitutions change the amino acid: round(10*log10(3/w)).
+/// A position that only rarely changes the amino acid contributes a higher
+/// effective quality. w=0 is never looked up.
+const WEIGHT_BOOST: [u8; 4] = [0, 5, 2, 0];
+
+/// Translate one codon to an amino acid and an effective quality score
+/// (clamped to 0..=40). The score is the minimum over the positions that
+/// can change the amino acid of the position's phred score boosted by its
+/// weight, so a low-quality base that determines the amino acid flags the
+/// whole amino acid as uncertain while a redundant third base is ignored.
+/// Ambiguous codons translate to 'X' at quality 0; stop codons always
+/// return quality 0 so they render in red.
+fn codon_aa_quality(
+    first: u8,
+    second: u8,
+    third: u8,
+    qual_first: u8,
+    qual_second: u8,
+    qual_third: u8,
+    base_phred: u8,
+) -> (char, u8) {
+    let Some(idx) = codon_index(first, second, third) else {
+        return ('X', 0);
+    };
+    let aa = CODON_TABLE[idx];
+    if aa == '*' {
+        return (aa, 0);
+    }
+    let weights = CODON_WEIGHTS[idx];
+    let quals = [
+        qual_first.saturating_sub(base_phred).min(40),
+        qual_second.saturating_sub(base_phred).min(40),
+        qual_third.saturating_sub(base_phred).min(40),
+    ];
+    let mut best = u8::MAX;
+    for (weight, qual) in [weights >> 4, (weights >> 2) & 0b11, weights & 0b11]
+        .into_iter()
+        .zip(quals)
+    {
+        if weight != 0 {
+            best = best.min(qual + WEIGHT_BOOST[weight as usize]).min(40);
+        }
+    }
+    (aa, best)
+}
+
+/// Translate one reading frame of a nucleotide sequence into amino acids,
+/// paired with an effective quality score per amino acid. Only complete
+/// codons are translated; a trailing partial codon is ignored. If the
+/// quality string is shorter than the sequence, missing scores are treated
+/// as quality 0.
+fn translate_frame_qual(
+    strand: &[u8],
+    qual: &[u8],
+    frame: usize,
+    base_phred: u8,
+) -> (String, Vec<u8>) {
     let mut aa = String::new();
+    let mut scores = Vec::new();
     let mut i = frame;
     while i + 2 < strand.len() {
-        aa.push(translate_codon(strand[i], strand[i + 1], strand[i + 2]));
+        let (ch, q) = codon_aa_quality(
+            strand[i],
+            strand[i + 1],
+            strand[i + 2],
+            qual.get(i).copied().unwrap_or(0),
+            qual.get(i + 1).copied().unwrap_or(0),
+            qual.get(i + 2).copied().unwrap_or(0),
+            base_phred,
+        );
+        aa.push(ch);
+        scores.push(q);
         i += 3;
     }
-    aa
+    (aa, scores)
+}
+
+/// Translate a nucleotide sequence in all six reading frames, pairing each
+/// amino acid with an effective quality score derived from the phred scores
+/// of the codon positions that determine the amino acid. Frames 1-3 are
+/// read from the given strand, frames 4-6 from its reverse complement; the
+/// quality string is reversed along with the sequence so scores stay paired
+/// with their bases.
+pub fn translate_frames_with_quality(
+    seq: &[u8],
+    qual: &[u8],
+    base_phred: u8,
+) -> Vec<(String, Vec<u8>)> {
+    let revcomp = dna::revcomp(seq);
+    let qual_rev: Vec<u8> = qual.iter().rev().copied().collect();
+    (0..3)
+        .map(|frame| translate_frame_qual(seq, qual, frame, base_phred))
+        .chain((0..3).map(|frame| translate_frame_qual(&revcomp, &qual_rev, frame, base_phred)))
+        .collect()
 }
 
 /// Translate a nucleotide sequence in all six reading frames. Frames 1-3
 /// are read from the given strand, frames 4-6 from its reverse complement.
 pub fn translate_frames(seq: &[u8]) -> Vec<String> {
-    let revcomp = dna::revcomp(seq);
-    (0..3)
-        .map(|frame| translate_frame(seq, frame))
-        .chain((0..3).map(|frame| translate_frame(&revcomp, frame)))
+    translate_frames_with_quality(seq, &[], 0)
+        .into_iter()
+        .map(|(frame, _)| frame)
         .collect()
 }
 
@@ -343,6 +440,104 @@ mod tests {
             CODON_TABLE.iter().collect::<String>(),
             "KNKNTTTTRSRSIIMIQHQHPPPPRRRRLLLLEDEDAAAAGGGGVVVV*Y*YSSSS*CWCLFLF"
         );
+    }
+
+    #[test]
+    fn test_codon_weights_consistent_with_table() {
+        // For every codon, recompute how many of the three possible base
+        // substitutions at each position change the amino acid and check it
+        // matches the packed CODON_WEIGHTS constant.
+        let bases = b"ACGT";
+        let mut idx = 0;
+        for &first in bases {
+            for &second in bases {
+                for &third in bases {
+                    let ref_aa = CODON_TABLE
+                        [(base_index(first) << 4) | (base_index(second) << 2) | base_index(third)];
+                    let mut weight = [0u8; 3];
+                    for (pos, base) in [first, second, third].iter().enumerate() {
+                        for &alt in bases {
+                            if alt == *base {
+                                continue;
+                            }
+                            let mut codon = [first, second, third];
+                            codon[pos] = alt;
+                            let aa = CODON_TABLE[(base_index(codon[0]) << 4)
+                                | (base_index(codon[1]) << 2)
+                                | base_index(codon[2])];
+                            if aa != ref_aa {
+                                weight[pos] += 1;
+                            }
+                        }
+                    }
+                    let packed = (weight[0] << 4) | (weight[1] << 2) | weight[2];
+                    assert_eq!(CODON_WEIGHTS[idx], packed, "codon index {idx}");
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_codon_quality_fourfold_excludes_third_base() {
+        // GGG is Gly, a four-fold degenerate codon: positions 1-2 determine
+        // the amino acid, so a bad third base must not drag the score down.
+        let (aa, q) = codon_aa_quality(b'G', b'G', b'G', 73, 73, 33, 33);
+        assert_eq!(aa, 'G');
+        assert_eq!(q, 40);
+    }
+
+    #[test]
+    fn test_codon_quality_twofolds_keep_third_base() {
+        // GAA is Glu; the third base still decides Glu vs Asp, so it counts
+        // (weight 2 -> +2 boost), turning a score-0 base into effective 2.
+        let (aa, q) = codon_aa_quality(b'G', b'A', b'A', 73, 73, 33, 33);
+        assert_eq!(aa, 'E');
+        assert_eq!(q, 2);
+    }
+
+    #[test]
+    fn test_codon_quality_threefold_keeps_third_base() {
+        // ATA is Ile; only one of three substitutions at the third base
+        // (to ATG/Met) changes the amino acid, so it is kept with a +5 boost.
+        let (aa, q) = codon_aa_quality(b'A', b'T', b'A', 73, 73, 33, 33);
+        assert_eq!(aa, 'I');
+        assert_eq!(q, 5);
+    }
+
+    #[test]
+    fn test_codon_quality_min_of_informative_positions() {
+        // ATG is Met, unique codon: all three positions matter, so the score
+        // is the worst of the three.
+        let (aa, q) = codon_aa_quality(b'A', b'T', b'G', 73, 43, 73, 33);
+        assert_eq!(aa, 'M');
+        assert_eq!(q, 10);
+    }
+
+    #[test]
+    fn test_codon_quality_boost_clamped() {
+        // All-high-quality GAA: the boosted third base clamps back to 40.
+        let (aa, q) = codon_aa_quality(b'G', b'A', b'A', 73, 73, 73, 33);
+        assert_eq!(aa, 'E');
+        assert_eq!(q, 40);
+    }
+
+    #[test]
+    fn test_codon_quality_ambiguous_and_stops() {
+        // N codons translate to X at quality 0, stop codons stay at quality 0.
+        assert_eq!(codon_aa_quality(b'N', b'N', b'N', 73, 73, 73, 33), ('X', 0));
+        assert_eq!(codon_aa_quality(b'T', b'G', b'A', 73, 73, 73, 33), ('*', 0));
+    }
+
+    #[test]
+    fn test_translate_frames_with_quality() {
+        // ATG GGG TAA -> M G *, with the third base of the four-fold GGG
+        // codon at quality 0 (ASCII 33).
+        let seq = b"ATGGGGTAA";
+        let qual = [73u8, 73, 73, 73, 73, 33, 73, 73, 73];
+        let frames = translate_frames_with_quality(seq, &qual, 33);
+        assert_eq!(frames[0].0, "MG*");
+        assert_eq!(frames[0].1, vec![40, 40, 0]);
     }
 
     #[test]
