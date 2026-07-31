@@ -2054,7 +2054,10 @@ impl TuiViewer {
             if show_stats {
                 // Select stats based on active tab
                 let (stats_lock, label) = if self.is_paired && self.stats_tab == 1 {
-                    (self.stats_r2.lock().unwrap_or_else(|e| e.into_inner()), "R2")
+                    (
+                        self.stats_r2.lock().unwrap_or_else(|e| e.into_inner()),
+                        "R2",
+                    )
                 } else {
                     (self.stats.lock().unwrap_or_else(|e| e.into_inner()), "R1")
                 };
@@ -2074,12 +2077,18 @@ impl TuiViewer {
 
                 let tab_bar = if self.is_paired {
                     let r1_tab = if self.stats_tab == 0 {
-                        Span::styled(" [R1] ", Style::default().fg(Color::White).bg(Color::DarkGray))
+                        Span::styled(
+                            " [R1] ",
+                            Style::default().fg(Color::White).bg(Color::DarkGray),
+                        )
                     } else {
                         Span::styled("  R1  ", Style::default().fg(Color::DarkGray))
                     };
                     let r2_tab = if self.stats_tab == 1 {
-                        Span::styled(" [R2] ", Style::default().fg(Color::White).bg(Color::DarkGray))
+                        Span::styled(
+                            " [R2] ",
+                            Style::default().fg(Color::White).bg(Color::DarkGray),
+                        )
                     } else {
                         Span::styled("  R2  ", Style::default().fg(Color::DarkGray))
                     };
@@ -2087,7 +2096,10 @@ impl TuiViewer {
                         r1_tab,
                         Span::raw("  "),
                         r2_tab,
-                        Span::raw(format!("  FASTQ Statistics ({}) {}", label, status_indicator)),
+                        Span::raw(format!(
+                            "  FASTQ Statistics ({}) {}",
+                            label, status_indicator
+                        )),
                     ])
                 } else {
                     Line::from(Span::styled(
@@ -2263,9 +2275,7 @@ impl TuiViewer {
                     Line::from(
                         " Displays read statistics, quality histograms, and adapter contamination",
                     ),
-                    Line::from(
-                        " In paired mode, TAB switches between R1 and R2 stats",
-                    ),
+                    Line::from(" In paired mode, TAB switches between R1 and R2 stats"),
                 ];
 
                 let visible_height = help_chunks[1].height.saturating_sub(2) as usize; // Account for borders
