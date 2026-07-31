@@ -3,6 +3,7 @@ mod app;
 mod buffer;
 mod color;
 mod reader;
+mod search;
 mod utils;
 mod viewer;
 use app::run;

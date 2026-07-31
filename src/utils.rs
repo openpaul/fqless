@@ -59,19 +59,18 @@ impl PhredRange {
 
 /// Orientation in which reads are displayed. Quality scores always stay
 /// paired with their base, so the quality string is reversed together with
-/// the sequence.
+/// the sequence. FASTQ stores every read in 5'->3' order, so only the
+/// reverse complement (an unoriented read's other strand) is meaningful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOrientation {
     AsIs,
-    Reverse,
     ReverseComplement,
 }
 
 impl ReadOrientation {
     pub fn next(&self) -> Self {
         match self {
-            Self::AsIs => Self::Reverse,
-            Self::Reverse => Self::ReverseComplement,
+            Self::AsIs => Self::ReverseComplement,
             Self::ReverseComplement => Self::AsIs,
         }
     }
@@ -79,7 +78,6 @@ impl ReadOrientation {
     pub fn name(&self) -> &'static str {
         match self {
             Self::AsIs => "5'->3'",
-            Self::Reverse => "3'->5'",
             Self::ReverseComplement => "RC",
         }
     }
@@ -387,9 +385,8 @@ mod tests {
 
     #[test]
     fn test_read_orientation_cycle() {
-        assert_eq!(ReadOrientation::AsIs.next(), ReadOrientation::Reverse);
         assert_eq!(
-            ReadOrientation::Reverse.next(),
+            ReadOrientation::AsIs.next(),
             ReadOrientation::ReverseComplement
         );
         assert_eq!(
@@ -397,7 +394,6 @@ mod tests {
             ReadOrientation::AsIs
         );
         assert_eq!(ReadOrientation::AsIs.name(), "5'->3'");
-        assert_eq!(ReadOrientation::Reverse.name(), "3'->5'");
         assert_eq!(ReadOrientation::ReverseComplement.name(), "RC");
     }
 

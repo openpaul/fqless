@@ -2,6 +2,7 @@ use crate::adapter::{AdapterDetector, AdapterStats};
 use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
 use crate::reader::FastqReader;
+use crate::search::{Pattern, SearchIndex};
 use crate::utils::{
     calculate_record_lines, determine_min_max_phred, translate_frames_with_quality, PhredRange,
     ReadOrientation,
@@ -27,7 +28,7 @@ use std::io::stdin;
 use std::os::unix::io::AsRawFd;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
@@ -100,6 +101,18 @@ pub struct TuiViewer {
     stats_worker_handle: Option<JoinHandle<()>>,
     stats_stop_flag: Arc<AtomicBool>,
     color_scheme: ColorScheme,
+    search_mode: bool,
+    search_input: String,
+    search_query: String,
+    search_pattern: Option<Pattern>,
+    search_include_rc: bool,
+    search_index: Arc<Mutex<SearchIndex>>,
+    search_indexed_up_to: u64,
+    search_match_k: u64,
+    search_worker_handle: Option<JoinHandle<()>>,
+    search_stop_flag: Arc<AtomicBool>,
+    search_worker_scanned: Arc<AtomicU64>,
+    search_worker_done: Arc<AtomicBool>,
 }
 
 /// Calculate the layout for the stats page with blocks
@@ -466,6 +479,18 @@ impl TuiViewer {
             stats_worker_handle: None,
             stats_stop_flag: Arc::new(AtomicBool::new(false)),
             color_scheme: ColorScheme::RedGreen,
+            search_mode: false,
+            search_input: String::new(),
+            search_query: String::new(),
+            search_pattern: None,
+            search_include_rc: true,
+            search_index: Arc::new(Mutex::new(SearchIndex::new())),
+            search_indexed_up_to: 0,
+            search_match_k: 0,
+            search_worker_handle: None,
+            search_stop_flag: Arc::new(AtomicBool::new(false)),
+            search_worker_scanned: Arc::new(AtomicU64::new(0)),
+            search_worker_done: Arc::new(AtomicBool::new(true)),
         };
 
         // Start background statistics calculation
@@ -533,6 +558,199 @@ impl TuiViewer {
         if let Ok(mut stats_lock) = self.stats.lock() {
             *stats_lock = FastqStats::default();
         }
+    }
+
+    /// Handle a key while the search prompt is active.
+    fn handle_search_key(&mut self, key: Key) {
+        match key {
+            Key::Char('\n') => {
+                self.search_input = self.search_input.trim().to_string();
+                self.search_mode = false;
+                self.search_query = self.search_input.clone();
+                self.apply_search_pattern();
+                // Like less: jump to the first match at or after the current
+                // position once the pattern is committed.
+                let target = self
+                    .search_index
+                    .lock()
+                    .unwrap()
+                    .next(self.current_position);
+                if let Some(m) = target {
+                    let k = self.search_index.lock().unwrap().count_up_to(m);
+                    self.search_match_k = k;
+                    let _ = self.jump_to_record(m);
+                }
+            }
+            Key::Char(c) => {
+                if !c.is_control() {
+                    self.search_input.push(c);
+                }
+            }
+            Key::Backspace => {
+                self.search_input.pop();
+            }
+            Key::Esc | Key::Ctrl('c') => {
+                self.search_mode = false;
+                self.search_input.clear();
+            }
+            _ => {}
+        }
+    }
+
+    /// (Re)build the active search pattern from the committed query, reset
+    /// the index, index already-loaded records and start the look-ahead worker.
+    fn apply_search_pattern(&mut self) {
+        if self.search_query.trim().is_empty() {
+            self.clear_search();
+            return;
+        }
+        let pattern = match Pattern::new(&self.search_query, self.search_include_rc) {
+            Some(p) => p,
+            None => {
+                self.clear_search();
+                return;
+            }
+        };
+        self.search_index.lock().unwrap().reset();
+        self.search_indexed_up_to = 0;
+        self.search_match_k = 0;
+        self.search_pattern = Some(pattern);
+        self.index_loaded_records();
+        self.start_search_worker();
+    }
+
+    /// Clear the active search and stop the look-ahead worker.
+    fn clear_search(&mut self) {
+        self.stop_search_worker();
+        self.search_pattern = None;
+        self.search_query.clear();
+        self.search_include_rc = true;
+        self.search_index.lock().unwrap().reset();
+        self.search_indexed_up_to = 0;
+        self.search_match_k = 0;
+    }
+
+    /// Scan newly loaded records on the main thread and mark matches in the
+    /// index. Cheap per frame: only the delta since the last scan is visited.
+    fn index_loaded_records(&mut self) {
+        let Some(pattern) = self.search_pattern.clone() else {
+            self.search_indexed_up_to = self.buffer.reads.read().unwrap().len() as u64;
+            return;
+        };
+        let reads = self.buffer.reads.read().unwrap();
+        let len = reads.len() as u64;
+        let mut index = self.search_index.lock().unwrap();
+        for record_idx in self.search_indexed_up_to..len {
+            if pattern.has_match(reads[record_idx as usize].seq()) {
+                index.set(record_idx);
+            }
+        }
+        self.search_indexed_up_to = len;
+    }
+
+    /// Jump to a record index, streaming forward if it is not loaded yet.
+    fn jump_to_record(&mut self, record: u64) -> Result<()> {
+        self.current_position = record;
+        self.buffer
+            .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+        let len = self.buffer.reads.read().unwrap().len() as u64;
+        if len > 0 && self.current_position >= len {
+            self.current_position = len - 1;
+        }
+        Ok(())
+    }
+
+    /// Move to the next (or previous) matching record relative to the current
+    /// position. Returns Ok(false) if no further match is known.
+    fn next_match(&mut self, forward: bool) -> Result<()> {
+        if self.search_pattern.is_none() {
+            return Ok(());
+        }
+        let index = self.search_index.lock().unwrap();
+        let target = if forward {
+            index.next(self.current_position + 1)
+        } else {
+            index.prev(self.current_position)
+        };
+        let k = target.map(|m| index.count_up_to(m));
+        drop(index);
+        if let Some(m) = target {
+            self.search_match_k = k.unwrap_or(0);
+            self.jump_to_record(m)?;
+        }
+        Ok(())
+    }
+
+    /// Start (or restart) the background look-ahead search worker. Scans the
+    /// whole file on its own reader, setting index bits as it goes. Skipped
+    /// for stdin, which cannot be re-read.
+    fn start_search_worker(&mut self) {
+        self.stop_search_worker();
+        let Some(pattern) = self.search_pattern.clone() else {
+            return;
+        };
+        if self.file_path == "-" {
+            self.search_worker_done.store(true, Ordering::SeqCst);
+            return;
+        }
+
+        self.search_stop_flag = Arc::new(AtomicBool::new(false));
+        self.search_worker_done.store(false, Ordering::SeqCst);
+        self.search_worker_scanned.store(0, Ordering::SeqCst);
+
+        let index = Arc::clone(&self.search_index);
+        let scanned = Arc::clone(&self.search_worker_scanned);
+        let done = Arc::clone(&self.search_worker_done);
+        let stop_flag = Arc::clone(&self.search_stop_flag);
+        let file_path = self.file_path.clone();
+
+        let handle = thread::spawn(move || {
+            if let Err(e) =
+                Self::search_background(&pattern, &file_path, index, scanned, done, stop_flag)
+            {
+                eprintln!("Search error: {}", e);
+            }
+        });
+        self.search_worker_handle = Some(handle);
+    }
+
+    // Stop the search worker if it is running
+    fn stop_search_worker(&mut self) {
+        if let Some(handle) = self.search_worker_handle.take() {
+            self.search_stop_flag.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+        }
+    }
+
+    /// Background search: stream the file once, setting index bits for every
+    /// record containing a match. This provides look-ahead past the loaded
+    /// buffer without storing anything but the one-bit-per-record index.
+    fn search_background(
+        pattern: &Pattern,
+        file_path: &str,
+        index: Arc<Mutex<SearchIndex>>,
+        scanned: Arc<AtomicU64>,
+        done: Arc<AtomicBool>,
+        stop_flag: Arc<AtomicBool>,
+    ) -> Result<()> {
+        let reader = FastqReader::new(file_path)?;
+        let mut record_idx = 0u64;
+        for record in reader.into_fastq_reader().records() {
+            if stop_flag.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let record = record?;
+            if pattern.has_match(record.seq()) {
+                index.lock().unwrap().set(record_idx);
+            }
+            record_idx += 1;
+            if record_idx.is_multiple_of(10000) {
+                scanned.store(record_idx, Ordering::Relaxed);
+            }
+        }
+        scanned.store(record_idx, Ordering::SeqCst);
+        done.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     // Fast read counter - just counts total reads without detailed analysis
@@ -770,30 +988,88 @@ impl TuiViewer {
         Ok(())
     }
 
+    /// The pattern to use for highlighting right now: while typing a new
+    /// pattern in the search prompt it updates live, otherwise the committed
+    /// pattern applies.
+    fn highlight_pattern(&self) -> Option<Pattern> {
+        if self.search_mode && !self.search_input.trim().is_empty() {
+            Pattern::new(self.search_input.trim(), self.search_include_rc)
+        } else {
+            self.search_pattern.clone()
+        }
+    }
+
+    /// Render a base as either its quality color or the search-match
+    /// highlight (yellow background) when it falls inside a match range.
+    fn base_span<'a>(&self, base: u8, quality: u8, highlighted: bool) -> Span<'a> {
+        if highlighted {
+            Span::styled(
+                char::from(base).to_string(),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            )
+        } else {
+            let quality_score = quality.saturating_sub(self.phred_range.base_phred());
+            let color = self.color_scheme.quality_to_color(quality_score);
+            Span::styled(char::from(base).to_string(), Style::default().fg(color))
+        }
+    }
+
     fn colorize_sequence<'a>(&self, sequence: &[u8], quality: &[u8]) -> Vec<Span<'a>> {
-        sequence
-            .iter()
-            .zip(quality.iter())
-            .map(|(nucleotide, qual_char)| {
-                let quality_score = qual_char.saturating_sub(self.phred_range.base_phred());
-                let color = self.color_scheme.quality_to_color(quality_score);
-                Span::styled(
-                    char::from(*nucleotide).to_string(),
-                    Style::default().fg(color),
-                )
-            })
-            .collect()
+        let ranges = self
+            .highlight_pattern()
+            .map(|p| p.find_merged_matches(sequence))
+            .unwrap_or_default();
+        let mut spans = Vec::with_capacity(sequence.len());
+        let mut pos = 0;
+        for (start, end) in &ranges {
+            for (i, &base) in sequence[pos..*start].iter().enumerate() {
+                spans.push(self.base_span(base, quality[pos + i], false));
+            }
+            for &base in &sequence[*start..*end] {
+                spans.push(self.base_span(base, 0, true));
+            }
+            pos = *end;
+        }
+        for (i, &base) in sequence[pos..].iter().enumerate() {
+            spans.push(self.base_span(base, quality[pos + i], false));
+        }
+        spans
+    }
+
+    /// Plain-text sequence line (shown when quality is displayed separately),
+    /// with search matches highlighted.
+    fn raw_sequence_with_highlight<'a>(&self, sequence: &[u8]) -> Vec<Span<'a>> {
+        let ranges = self
+            .highlight_pattern()
+            .map(|p| p.find_merged_matches(sequence))
+            .unwrap_or_default();
+        let mut spans = Vec::with_capacity(sequence.len());
+        let mut pos = 0;
+        for (start, end) in &ranges {
+            for &base in &sequence[pos..*start] {
+                spans.push(Span::raw(char::from(base).to_string()));
+            }
+            for &base in &sequence[*start..*end] {
+                spans.push(self.base_span(base, 0, true));
+            }
+            pos = *end;
+        }
+        for &base in &sequence[pos..] {
+            spans.push(Span::raw(char::from(base).to_string()));
+        }
+        spans
     }
 
     /// Return the sequence and quality of a record in the currently selected
     /// orientation. Quality stays paired with its base, so it is reversed
-    /// whenever the sequence is.
+    /// together with the sequence for the reverse complement.
     fn oriented_seq_qual(&self, record: &fastq::Record) -> (Vec<u8>, Vec<u8>) {
-        let qual_rev: Vec<u8> = record.qual().iter().rev().copied().collect();
         match self.orientation {
             ReadOrientation::AsIs => (record.seq().to_vec(), record.qual().to_vec()),
-            ReadOrientation::Reverse => (record.seq().iter().rev().copied().collect(), qual_rev),
-            ReadOrientation::ReverseComplement => (dna::revcomp(record.seq()), qual_rev),
+            ReadOrientation::ReverseComplement => (
+                dna::revcomp(record.seq()),
+                record.qual().iter().rev().copied().collect(),
+            ),
         }
     }
 
@@ -841,8 +1117,34 @@ impl TuiViewer {
             while let Ok(key) = rx.try_recv() {
                 had_input = true;
                 needs_redraw = true;
+                if self.search_mode {
+                    self.handle_search_key(key);
+                    continue;
+                }
                 match key {
                     Key::Char('q') | Key::Ctrl('c') => return Ok(()),
+                    Key::Char('/') => {
+                        if !self.show_stats && !self.show_help {
+                            self.search_mode = true;
+                            self.search_input.clear();
+                        }
+                    }
+                    Key::Char('n') => {
+                        if !self.show_stats && !self.show_help {
+                            self.next_match(true)?;
+                        }
+                    }
+                    Key::Char('N') => {
+                        if !self.show_stats && !self.show_help {
+                            self.next_match(false)?;
+                        }
+                    }
+                    Key::Char('x') => {
+                        if self.search_pattern.is_some() {
+                            self.search_include_rc = !self.search_include_rc;
+                            self.apply_search_pattern();
+                        }
+                    }
                     Key::Char('c') => {
                         // iterate color schemes
                         self.color_scheme = self.color_scheme.next();
@@ -855,7 +1157,7 @@ impl TuiViewer {
                         self.show_quality = !self.show_quality;
                     }
                     Key::Char('r') => {
-                        // Cycle read orientation: 5'->3', 3'->5', reverse complement
+                        // Cycle read orientation: 5'->3', reverse complement
                         self.orientation = self.orientation.next();
                         self.horizontal_offset = 0;
                     }
@@ -1000,6 +1302,10 @@ impl TuiViewer {
     }
 
     fn draw(&mut self) -> Result<()> {
+        // Keep the match index up to date for any records loaded since the
+        // last frame (also covers the initial window).
+        self.index_loaded_records();
+
         let terminal_size = self.terminal.size()?;
         let terminal_width = terminal_size.width as usize;
 
@@ -1103,9 +1409,7 @@ impl TuiViewer {
             let sequence_spans = if !self.show_quality {
                 self.colorize_sequence(visible_sequence, visible_quality)
             } else {
-                vec![Span::raw(
-                    String::from_utf8_lossy(visible_sequence).to_string(),
-                )]
+                self.raw_sequence_with_highlight(visible_sequence)
             };
 
             prepared_lines.push(Line::from(sequence_spans));
@@ -1120,9 +1424,46 @@ impl TuiViewer {
         let wrap_status = if no_wrap { "NO-WRAP" } else { "WRAP" };
 
         let help_text = if no_wrap {
-            "↑/k: Up | ↓/j: Down | ←/→: Scroll | PgUp/PgDn: Page | S: Wrap | s: Stats | c: Colors | q: Quit"
+            "↑/k: Up | ↓/j: Down | ←/→: Scroll | PgUp/PgDn: Page | S: Wrap | /: Search | s: Stats | c: Colors | q: Quit"
         } else {
-            "↑/k: Up | ↓/j: Down | PgUp/PgDn: Page | S: No-Wrap | s: Stats | c: Colors | q: Quit"
+            "↑/k: Up | ↓/j: Down | PgUp/PgDn: Page | S: No-Wrap | /: Search | s: Stats | c: Colors | q: Quit"
+        };
+
+        let search_status = if self.search_pattern.is_some() {
+            let count = self.search_index.lock().unwrap().count();
+            let rc = if self.search_include_rc { "+RC" } else { "-RC" };
+            let scanning = if self.search_worker_done.load(Ordering::SeqCst) {
+                String::new()
+            } else {
+                format!(
+                    " scanning…({})",
+                    self.search_worker_scanned
+                        .load(Ordering::SeqCst)
+                        .to_formatted_string(&Locale::en)
+                )
+            };
+            format!(
+                " | /{} {rc} {}/{}{}",
+                self.search_query, self.search_match_k, count, scanning
+            )
+        } else {
+            String::new()
+        };
+
+        let footer = if self.search_mode {
+            format!("/{}▌", self.search_input)
+        } else if self.search_pattern.is_some() {
+            format!(
+                "{} | n/N: prev/next | x: {} | /: Search | q: Quit",
+                help_text,
+                if self.search_include_rc {
+                    "+RC"
+                } else {
+                    "exact"
+                }
+            )
+        } else {
+            help_text.to_string()
         };
 
         self.terminal.draw(|f| {
@@ -1272,10 +1613,7 @@ impl TuiViewer {
                 // Full screen help content
                 let help_content = vec![
                     Line::from(Span::styled(
-                        format!(
-                            "FQLESS - FastQ File Viewer v{}",
-                            env!("CARGO_PKG_VERSION")
-                        ),
+                        format!("FQLESS - FastQ File Viewer v{}", env!("CARGO_PKG_VERSION")),
                         Style::default(),
                     )),
                     Line::from(""),
@@ -1296,8 +1634,20 @@ impl TuiViewer {
                     Line::from("  h          - Toggle this help screen"),
                     Line::from(""),
                     Line::from("Orientation & Translation:"),
-                    Line::from("  r          - Cycle read orientation (5'->3', 3'->5', reverse complement)"),
+                    Line::from(
+                        "  r          - Cycle read orientation (5'->3', reverse complement)",
+                    ),
                     Line::from("  t          - Toggle 6-frame translation"),
+                    Line::from(""),
+                    Line::from("Search:"),
+                    Line::from(
+                        "  /          - Search (exact, case-insensitive, matches in yellow)",
+                    ),
+                    Line::from("  n          - Jump to next match"),
+                    Line::from("  N          - Jump to previous match"),
+                    Line::from("  x          - Toggle reverse-complement search"),
+                    Line::from("  Esc        - Cancel search"),
+                    Line::from("  Enter      - Commit search and jump to first match"),
                     Line::from(""),
                     Line::from("Quality & Color:"),
                     Line::from("  e          - Cycle phred score encoding range"),
@@ -1366,7 +1716,7 @@ impl TuiViewer {
                 .unwrap_or(&self.file_path);
 
             let status = Paragraph::new(format!(
-                "File: {} | Records: {} | Pos: {} | {} | {} | {} {}-{} {}",
+                "File: {} | Records: {} | Pos: {} | {} | {} | {} {}-{}{}{}",
                 filename,
                 self.stats
                     .lock()
@@ -1379,7 +1729,12 @@ impl TuiViewer {
                 self.phred_range.name(),
                 self.phred_range.base_phred(),
                 self.phred_range.top_phred(),
-                if self.show_translation { "| 6-FRAME" } else { "" }
+                if self.show_translation {
+                    " | 6-FRAME"
+                } else {
+                    ""
+                },
+                search_status
             ))
             .style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
@@ -1396,7 +1751,7 @@ impl TuiViewer {
 
             // Help line
             let help: Paragraph<'_> =
-                Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
+                Paragraph::new(footer.clone()).style(Style::default().fg(Color::DarkGray));
 
             f.render_widget(help, main_chunks[2]);
         })?;
@@ -1408,6 +1763,7 @@ impl TuiViewer {
 impl Drop for TuiViewer {
     fn drop(&mut self) {
         self.stop_stats_worker();
+        self.stop_search_worker();
 
         let _ = write!(
             self.terminal.backend_mut(),

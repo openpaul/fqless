@@ -43,8 +43,9 @@ cargo build --release
 
 - Opens the file, shows the sequence color coded, so one can decide if the run quality is nice and fits the expectations.
 - Shows number of reads and some basic statistics
-- Press `r` to cycle read orientation: as-is (`5'->3'`), reversed (`3'->5'`), or reverse complemented. Quality scores stay paired with their bases.
+- Press `r` to cycle read orientation: as-is (`5'->3'`) or reverse complemented. Quality scores stay paired with their bases.
 - Press `t` to show all six reading frames translated to amino acids (stops shown in red as `*`).
+- Press `/` to search: matches are highlighted in yellow as you type. `n`/`N` jump to the next/previous match, and `x` toggles reverse-complement search (reads are unoriented, so by default a pattern also matches its reverse complement). Searches are exact and case-insensitive, and a background thread indexes the whole file (one bit per read) so you can jump to matches beyond what is loaded.
 
 ## Statistics (press 's')
 
@@ -75,7 +76,7 @@ Supported adapter types:
 
 ## What it does not
 - Write to disk: Nothing is written to disk
-- Search: I chose to no have search but feel free to open a PR is you think it can be done well (consider performance, dependencies, memory)
+- Fuzzy search: Only exact substring matches are supported, not wildcards or regular expressions.
 
 
 # Bugs
