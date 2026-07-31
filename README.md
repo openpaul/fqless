@@ -18,6 +18,17 @@ fqless file.fastq.gz
 fqless file.fastq
 ```
 
+For paired-end sequencing data, pass both files:
+
+```sh
+fqless R1.fastq.gz R2.fastq.gz
+```
+
+Paired reads are shown interleaved: a shared header line followed by the R1 sequence
+(prefixed with `1:`) and the R2 sequence (prefixed with `2:`). Both sequences share the
+same orientation and are searched together. Press `Tab` in the stats view to switch between
+R1 and R2 statistics.
+
 Or pipe into it (although stats are then only shown for all loaded reads, not the whole file):
 
 ```sh
