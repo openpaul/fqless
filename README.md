@@ -76,7 +76,7 @@ Supported adapter types:
 
 ## What it does not
 - Write to disk: Nothing is written to disk
-- Fuzzy search: Only exact substring matches are supported, not wildcards or regular expressions.
+- Wildcard / regex search: only exact substring matches are supported (nucleotide or amino acid), not wildcards or regular expressions.
 
 
 # Bugs
