@@ -85,8 +85,10 @@ impl ReadOrientation {
     }
 }
 
-// Standard genetic code. Index: (first*16) + (second*4) + third, where
-// A=0, C=1, G=2, T=3. '*' marks a stop codon.
+// Standard genetic code (NCBI transl_table=1), cross-checked against
+// Biopython's Bio/Data/CodonTable.py (Table 1). Index:
+// (first*16) + (second*4) + third, where A=0, C=1, G=2, T=3.
+// '*' marks a stop codon.
 const CODON_TABLE: [char; 64] = [
     'K', 'N', 'K', 'N', // AAA AAC AAG AAT
     'T', 'T', 'T', 'T', // ACA ACC ACG ACT
@@ -330,5 +332,42 @@ mod tests {
         // N codons translate to X, stop codons to '*'
         assert_eq!(translate_frames(b"TGA")[0], "*");
         assert_eq!(translate_frames(b"NNN")[0], "X");
+    }
+
+    #[test]
+    fn test_codon_table_matches_standard_genetic_code() {
+        // Full-table regression check against the NCBI standard genetic code
+        // (transl_table=1), cross-checked with Biopython CodonTable.py Table 1.
+        // Listed in A/C/G/T order to match CODON_TABLE's index layout.
+        assert_eq!(
+            CODON_TABLE.iter().collect::<String>(),
+            "KNKNTTTTRSRSIIMIQHQHPPPPRRRRLLLLEDEDAAAAGGGGVVVV*Y*YSSSS*CWCLFLF"
+        );
+    }
+
+    #[test]
+    fn test_translate_known_protein_hbb() {
+        // Human beta-globin CDS from NCBI NM_000518.5 (positions 51..494,
+        // 444 nt, ends in the TAA stop codon) and its translation
+        // NP_000509.1 (hemoglobin subunit beta, 147 aa).
+        let cds = concat!(
+            "ATGGTGCATCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAG",
+            "TTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTGGTCTACCCTTGGACCCAGAGGTTCTTTGAGTCCTTTGG",
+            "GGATCTGTCCACTCCTGATGCTGTTATGGGCAACCCTAAGGTGAAGGCTCATGGCAAGAAAGTGCTCGGT",
+            "GCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAGGGCACCTTTGCCACACTGAGTGAGCTGCACT",
+            "GTGACAAGCTGCACGTGGATCCTGAGAACTTCAGGCTCCTGGGCAACGTGCTGGTCTGTGTGCTGGCCCA",
+            "TCACTTTGGCAAAGAATTCACCCCACCAGTGCAGGCTGCCTATCAGAAAGTGGTGGCTGGTGTGGCTAAT",
+            "GCCCTGGCCCACAAGTATCACTAA",
+        );
+        let protein = concat!(
+            "MVHLTPEEKSAVTALWGKVNVDEVGGEALGRLLVVYPWTQRFFESFGDLSTPDAVMGNPKVKAHGKKVLG",
+            "AFSDGLAHLDNLKGTFATLSELHCDKLHVDPENFRLLGNVLVCVLAHHFGKEFTPPVQAAYQKVVAGVAN",
+            "ALAHKYH*",
+        );
+
+        let frames = translate_frames(cds.as_bytes());
+        assert_eq!(frames.len(), 6);
+        assert_eq!(frames[0], protein);
+        assert_eq!(frames[0].len(), 148);
     }
 }
