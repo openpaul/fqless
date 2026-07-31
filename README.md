@@ -43,6 +43,8 @@ cargo build --release
 
 - Opens the file, shows the sequence color coded, so one can decide if the run quality is nice and fits the expectations.
 - Shows number of reads and some basic statistics
+- Press `r` to cycle read orientation: as-is (`5'->3'`), reversed (`3'->5'`), or reverse complemented. Quality scores stay paired with their bases.
+- Press `t` to show all six reading frames translated to amino acids (stops shown in red as `*`).
 
 ## Statistics (press 's')
 

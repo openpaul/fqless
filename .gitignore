@@ -12,3 +12,4 @@ Makefile
 target
 Cargo.lock
 *fastq.gz
+example/*fastq.gz

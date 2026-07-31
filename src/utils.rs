@@ -1,3 +1,4 @@
+use bio::alphabets::dna;
 use bio::io::fastq;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +57,98 @@ impl PhredRange {
     }
 }
 
+/// Orientation in which reads are displayed. Quality scores always stay
+/// paired with their base, so the quality string is reversed together with
+/// the sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOrientation {
+    AsIs,
+    Reverse,
+    ReverseComplement,
+}
+
+impl ReadOrientation {
+    pub fn next(&self) -> Self {
+        match self {
+            Self::AsIs => Self::Reverse,
+            Self::Reverse => Self::ReverseComplement,
+            Self::ReverseComplement => Self::AsIs,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::AsIs => "5'->3'",
+            Self::Reverse => "3'->5'",
+            Self::ReverseComplement => "RC",
+        }
+    }
+}
+
+// Standard genetic code. Index: (first*16) + (second*4) + third, where
+// A=0, C=1, G=2, T=3. '*' marks a stop codon.
+const CODON_TABLE: [char; 64] = [
+    'K', 'N', 'K', 'N', // AAA AAC AAG AAT
+    'T', 'T', 'T', 'T', // ACA ACC ACG ACT
+    'R', 'S', 'R', 'S', // AGA AGC AGG AGT
+    'I', 'I', 'M', 'I', // ATA ATC ATG ATT
+    'Q', 'H', 'Q', 'H', // CAA CAC CAG CAT
+    'P', 'P', 'P', 'P', // CCA CCC CCG CCT
+    'R', 'R', 'R', 'R', // CGA CGC CGG CGT
+    'L', 'L', 'L', 'L', // CTA CTC CTG CTT
+    'E', 'D', 'E', 'D', // GAA GAC GAG GAT
+    'A', 'A', 'A', 'A', // GCA GCC GCG GCT
+    'G', 'G', 'G', 'G', // GGA GGC GGG GGT
+    'V', 'V', 'V', 'V', // GTA GTC GTG GTT
+    '*', 'Y', '*', 'Y', // TAA TAC TAG TAT
+    'S', 'S', 'S', 'S', // TCA TCC TCG TCT
+    '*', 'C', 'W', 'C', // TGA TGC TGG TGT
+    'L', 'F', 'L', 'F', // TTA TTC TTG TTT
+];
+
+fn base_index(base: u8) -> usize {
+    match base {
+        b'A' | b'a' => 0,
+        b'C' | b'c' => 1,
+        b'G' | b'g' => 2,
+        b'T' | b't' | b'U' | b'u' => 3,
+        _ => 4,
+    }
+}
+
+fn translate_codon(first: u8, second: u8, third: u8) -> char {
+    let first = base_index(first);
+    let second = base_index(second);
+    let third = base_index(third);
+    if first == 4 || second == 4 || third == 4 {
+        'X'
+    } else {
+        CODON_TABLE[(first << 4) | (second << 2) | third]
+    }
+}
+
+/// Translate one reading frame of a nucleotide sequence into amino acids.
+/// Only complete codons are translated; a trailing partial codon is ignored.
+fn translate_frame(strand: &[u8], frame: usize) -> String {
+    let mut aa = String::new();
+    let mut i = frame;
+    while i + 2 < strand.len() {
+        aa.push(translate_codon(strand[i], strand[i + 1], strand[i + 2]));
+        i += 3;
+    }
+    aa
+}
+
+/// Translate a nucleotide sequence in all six reading frames. Frames 1-3
+/// are read from the given strand, frames 4-6 from its reverse complement.
+pub fn translate_frames(seq: &[u8]) -> Vec<String> {
+    let revcomp = dna::revcomp(seq);
+    (0..3)
+        .map(|frame| translate_frame(seq, frame))
+        .chain((0..3).map(|frame| translate_frame(&revcomp, frame)))
+        .collect()
+}
+
 pub fn determine_min_max_phred(records: &[fastq::Record]) -> (u8, u8) {
     let mut min_phred = u8::MAX;
     let mut max_phred = u8::MIN;
@@ -76,8 +169,25 @@ pub fn calculate_record_lines(
     terminal_width: usize,
     no_wrap: bool,
     show_quality: bool,
+    translate: bool,
 ) -> usize {
     let header_lines = 1; // Header line (ID + description)
+
+    if translate {
+        // One line for the header plus one line per reading frame
+        let frames = translate_frames(record.seq());
+        return header_lines
+            + frames
+                .iter()
+                .map(|frame| {
+                    if no_wrap {
+                        1
+                    } else {
+                        frame.len().max(1).div_ceil(terminal_width)
+                    }
+                })
+                .sum::<usize>();
+    }
 
     let sequence_lines = if no_wrap {
         1 // No wrapping, always 1 line
@@ -150,15 +260,75 @@ mod tests {
         let record = Record::with_attrs("test", None, b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", b"IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII");
 
         // Test with wrapping, no quality - 100bp in 80 width terminal = 2 lines + 1 header = 3 lines
-        let lines = calculate_record_lines(&record, 80, false, false);
+        let lines = calculate_record_lines(&record, 80, false, false, false);
         assert_eq!(lines, 3); // 1 header + 2 sequence lines
 
         // Test with no wrapping - always 2 lines (header + sequence)
-        let lines = calculate_record_lines(&record, 80, true, false);
+        let lines = calculate_record_lines(&record, 80, true, false, false);
         assert_eq!(lines, 2);
 
         // Test with quality shown and wrapping - doubles sequence lines
-        let lines = calculate_record_lines(&record, 80, false, true);
+        let lines = calculate_record_lines(&record, 80, false, true, false);
         assert_eq!(lines, 5); // 1 header + 2 sequence + 2 quality
+    }
+
+    #[test]
+    fn test_calculate_record_lines_translation() {
+        use bio::io::fastq::Record;
+
+        // 9 bases -> 6 frames, each 1 line (fits in width) -> 7 lines total
+        let record = Record::with_attrs("test", None, b"ATGAAATAA", b"IIIIIIIII");
+
+        let lines = calculate_record_lines(&record, 80, false, false, true);
+        assert_eq!(lines, 7); // 1 header + 6 frames
+
+        let lines = calculate_record_lines(&record, 80, true, false, true);
+        assert_eq!(lines, 7);
+    }
+
+    #[test]
+    fn test_read_orientation_cycle() {
+        assert_eq!(ReadOrientation::AsIs.next(), ReadOrientation::Reverse);
+        assert_eq!(
+            ReadOrientation::Reverse.next(),
+            ReadOrientation::ReverseComplement
+        );
+        assert_eq!(
+            ReadOrientation::ReverseComplement.next(),
+            ReadOrientation::AsIs
+        );
+        assert_eq!(ReadOrientation::AsIs.name(), "5'->3'");
+        assert_eq!(ReadOrientation::Reverse.name(), "3'->5'");
+        assert_eq!(ReadOrientation::ReverseComplement.name(), "RC");
+    }
+
+    #[test]
+    fn test_translate_frames_simple() {
+        // ATG AAA TAA -> M K *
+        let frames = translate_frames(b"ATGAAATAA");
+        assert_eq!(frames.len(), 6);
+        assert_eq!(frames[0], "MK*");
+
+        // Frame 2 starts at index 1: TGA AAC -> * N
+        assert_eq!(frames[1], "*N");
+        // Frame 3 starts at index 2: GAA ATA -> E I
+        assert_eq!(frames[2], "EI");
+    }
+
+    #[test]
+    fn test_translate_frames_reverse_complement() {
+        // Reverse complement of AAAACCCC is GGGGTTTT, so frame 4 reads
+        // GGG GTT -> G V
+        let frames = translate_frames(b"AAAACCCC");
+        assert_eq!(frames[3], "GV");
+        // Frame 6 starts at index 2 of revcomp: GGT TTT -> G F
+        assert_eq!(frames[5], "GF");
+    }
+
+    #[test]
+    fn test_translate_frames_ambiguous_and_stops() {
+        // N codons translate to X, stop codons to '*'
+        assert_eq!(translate_frames(b"TGA")[0], "*");
+        assert_eq!(translate_frames(b"NNN")[0], "X");
     }
 }

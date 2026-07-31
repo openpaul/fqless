@@ -2,8 +2,11 @@ use crate::adapter::{AdapterDetector, AdapterStats};
 use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
 use crate::reader::FastqReader;
-use crate::utils::{calculate_record_lines, determine_min_max_phred, PhredRange};
+use crate::utils::{
+    calculate_record_lines, determine_min_max_phred, translate_frames, PhredRange, ReadOrientation,
+};
 use anyhow::Result;
+use bio::alphabets::dna;
 use bio::io::fastq;
 use nix::poll::PollFlags;
 use nix::poll::{poll, PollFd};
@@ -87,6 +90,8 @@ pub struct TuiViewer {
     show_quality: bool,
     show_stats: bool,
     show_help: bool,
+    orientation: ReadOrientation,
+    show_translation: bool,
     stats_scroll: usize,
     help_scroll: usize,
     phred_range: PhredRange,
@@ -335,7 +340,13 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph<'_> {
 impl TuiViewer {
     /// Calculate how many lines a record takes on screen
     fn calculate_record_lines(&self, record: &fastq::Record, terminal_width: usize) -> usize {
-        calculate_record_lines(record, terminal_width, self.no_wrap, self.show_quality)
+        calculate_record_lines(
+            record,
+            terminal_width,
+            self.no_wrap,
+            self.show_quality,
+            self.show_translation,
+        )
     }
 
     /// Calculate how many records fit on screen starting from given position
@@ -445,6 +456,8 @@ impl TuiViewer {
             show_quality: false,
             show_stats: false,
             show_help: false,
+            orientation: ReadOrientation::AsIs,
+            show_translation: false,
             stats_scroll: 0,
             help_scroll: 0,
             phred_range: PhredRange::Default,
@@ -771,6 +784,18 @@ impl TuiViewer {
             .collect()
     }
 
+    /// Return the sequence and quality of a record in the currently selected
+    /// orientation. Quality stays paired with its base, so it is reversed
+    /// whenever the sequence is.
+    fn oriented_seq_qual(&self, record: &fastq::Record) -> (Vec<u8>, Vec<u8>) {
+        let qual_rev: Vec<u8> = record.qual().iter().rev().copied().collect();
+        match self.orientation {
+            ReadOrientation::AsIs => (record.seq().to_vec(), record.qual().to_vec()),
+            ReadOrientation::Reverse => (record.seq().iter().rev().copied().collect(), qual_rev),
+            ReadOrientation::ReverseComplement => (dna::revcomp(record.seq()), qual_rev),
+        }
+    }
+
     pub fn run(&mut self) -> Result<()> {
         // Load initial record
         self.buffer
@@ -828,6 +853,15 @@ impl TuiViewer {
                     Key::Char('p') => {
                         self.show_quality = !self.show_quality;
                     }
+                    Key::Char('r') => {
+                        // Cycle read orientation: 5'->3', 3'->5', reverse complement
+                        self.orientation = self.orientation.next();
+                        self.horizontal_offset = 0;
+                    }
+                    Key::Char('t') => {
+                        self.show_translation = !self.show_translation;
+                        self.horizontal_offset = 0;
+                    }
                     Key::Char('h') => {
                         self.show_help = !self.show_help;
                         self.help_scroll = 0; // Reset scroll when toggling
@@ -838,8 +872,8 @@ impl TuiViewer {
                             self.horizontal_offset = 0;
                         }
                     }
-                    Key::Char('r') => {
-                        // Adjust coloring range by iterating through known ranges
+                    Key::Char('e') => {
+                        // Adjust phred encoding range by iterating through known ranges
                         self.phred_range = match self.phred_range {
                             PhredRange::Solexa => PhredRange::Illumina1_3,
                             PhredRange::Illumina1_3 => PhredRange::Illumina1_5,
@@ -997,21 +1031,63 @@ impl TuiViewer {
             };
             // Header line in cyan
             prepared_lines.push(Line::from(Span::styled(name.to_string(), Style::default())));
+
+            let (oriented_seq, oriented_qual) = self.oriented_seq_qual(record);
+
+            if self.show_translation {
+                // 6-frame translation: one line per reading frame
+                let frames = translate_frames(&oriented_seq);
+                // Left-pad the labels so the amino acid columns line up
+                let labels: Vec<String> = frames
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        if i < 3 {
+                            format!("  F{}: ", i + 1)
+                        } else {
+                            format!("  F{} (rc): ", i + 1)
+                        }
+                    })
+                    .collect();
+                let label_width = labels
+                    .iter()
+                    .map(|label| label.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                for (i, frame) in frames.iter().enumerate() {
+                    let label = format!("{:<width$}", labels[i], width = label_width);
+                    let visible = if no_wrap {
+                        let start = horizontal_offset.min(frame.len());
+                        let end = (start + terminal_width.saturating_sub(1)).min(frame.len());
+                        &frame[start..end]
+                    } else {
+                        frame.as_str()
+                    };
+                    let mut spans = vec![Span::styled(label, Style::default().fg(Color::DarkGray))];
+                    for ch in visible.chars() {
+                        let color = if ch == '*' { Color::Red } else { Color::White };
+                        spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+                    }
+                    prepared_lines.push(Line::from(spans));
+                }
+                continue;
+            }
+
             // Handle sequence display based on wrap mode
             let visible_sequence = if no_wrap {
-                let start = horizontal_offset.min(record.seq().len());
-                let end = (start + terminal_width.saturating_sub(1)).min(record.seq().len());
-                &record.seq()[start..end]
+                let start = horizontal_offset.min(oriented_seq.len());
+                let end = (start + terminal_width.saturating_sub(1)).min(oriented_seq.len());
+                &oriented_seq[start..end]
             } else {
-                record.seq()
+                &oriented_seq
             };
 
-            let visible_quality = if no_wrap && record.qual().len() > horizontal_offset {
+            let visible_quality = if no_wrap && oriented_qual.len() > horizontal_offset {
                 let quality_end =
-                    (horizontal_offset + terminal_width.saturating_sub(1)).min(record.qual().len());
-                &record.qual()[horizontal_offset..quality_end]
+                    (horizontal_offset + terminal_width.saturating_sub(1)).min(oriented_qual.len());
+                &oriented_qual[horizontal_offset..quality_end]
             } else {
-                record.qual()
+                &oriented_qual
             };
 
             let sequence_spans = if !self.show_quality {
@@ -1203,6 +1279,13 @@ impl TuiViewer {
                     Line::from("  p          - Toggle base quality display"),
                     Line::from("  h          - Toggle this help screen"),
                     Line::from(""),
+                    Line::from("Orientation & Translation:"),
+                    Line::from("  r          - Cycle read orientation (5'->3', 3'->5', reverse complement)"),
+                    Line::from("  t          - Toggle 6-frame translation"),
+                    Line::from(""),
+                    Line::from("Quality & Color:"),
+                    Line::from("  e          - Cycle phred score encoding range"),
+                    Line::from(""),
                     Line::from("Other:"),
                     Line::from("  q          - Quit"),
                     Line::from(""),
@@ -1267,7 +1350,7 @@ impl TuiViewer {
                 .unwrap_or(&self.file_path);
 
             let status = Paragraph::new(format!(
-                "File: {} | Records: {} | Pos: {} | {} | {} {}-{} ",
+                "File: {} | Records: {} | Pos: {} | {} | {} | {} {}-{} {}",
                 filename,
                 self.stats
                     .lock()
@@ -1276,9 +1359,11 @@ impl TuiViewer {
                     .to_formatted_string(&Locale::en),
                 current_position,
                 wrap_status,
+                self.orientation.name(),
                 self.phred_range.name(),
                 self.phred_range.base_phred(),
-                self.phred_range.top_phred()
+                self.phred_range.top_phred(),
+                if self.show_translation { "| 6-FRAME" } else { "" }
             ))
             .style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
