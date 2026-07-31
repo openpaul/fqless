@@ -1261,7 +1261,13 @@ impl TuiViewer {
 
                 // Full screen help content
                 let help_content = vec![
-                    Line::from(Span::styled("FQLESS - FastQ File Viewer", Style::default())),
+                    Line::from(Span::styled(
+                        format!(
+                            "FQLESS - FastQ File Viewer v{}",
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                        Style::default(),
+                    )),
                     Line::from(""),
                     Line::from("Navigation:"),
                     Line::from("  ↑/k        - Move up one record"),

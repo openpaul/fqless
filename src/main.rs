@@ -9,6 +9,7 @@ use app::run;
 use std::env;
 
 fn print_usage() {
+    println!("fqless v{} - FastQ File Viewer\n", env!("CARGO_PKG_VERSION"));
     println!("Usage: fqless <FASTQ file>\n");
     println!("Options:");
     println!("  -h, --help     Show this help message");
