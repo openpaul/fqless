@@ -37,6 +37,7 @@ pub struct AdapterDetector {
 struct KnownAdapter {
     name: String,
     sequence: Vec<u8>,
+    matcher: BNDM,
 }
 
 #[derive(Debug, Clone)]
@@ -75,13 +76,15 @@ impl AdapterDetector {
         macro_rules! add_adapter {
             ($vec:ident, $name:expr, $seq:expr) => {{
                 let seq = $seq.to_vec();
-                let rc = Self::revcomp($seq);
+                let rc = Self::revcomp(&seq);
                 $vec.push(KnownAdapter {
                     name: $name.to_string(),
+                    matcher: BNDM::new(&seq),
                     sequence: seq,
                 });
                 $vec.push(KnownAdapter {
                     name: format!("{}_RC", $name),
+                    matcher: BNDM::new(&rc),
                     sequence: rc,
                 });
             }};
@@ -117,11 +120,10 @@ impl AdapterDetector {
         let mut detections = Vec::new();
 
         for adapter in &self.adapters {
-            if adapter.sequence.is_empty() || adapter.sequence.len() > sequence.len() {
+            if adapter.sequence.len() > sequence.len() {
                 continue;
             }
-            let matcher = BNDM::new(&adapter.sequence);
-            for pos in matcher.find_all(sequence) {
+            for pos in adapter.matcher.find_all(sequence) {
                 detections.push(AdapterDetection {
                     adapter_name: adapter.name.clone(),
                     position: pos,
