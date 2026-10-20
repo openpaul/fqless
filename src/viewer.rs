@@ -2,7 +2,7 @@ use crate::adapter::{AdapterDetector, AdapterStats};
 use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
 use crate::reader::FastqReader;
-use crate::search::{Pattern, SearchIndex};
+use crate::search::{Pattern, SearchIndex, SearchScope};
 use crate::utils::{
     calculate_record_lines, determine_min_max_phred, translate_frames,
     translate_frames_with_quality, PhredRange, ReadOrientation,
@@ -129,6 +129,8 @@ pub struct TuiViewer {
     search_query: String,
     search_pattern: Option<Pattern>,
     search_include_rc: bool,
+    /// Which record fields the pattern matches: sequence, ID, or both.
+    search_scope: SearchScope,
     search_index: Arc<Mutex<SearchIndex>>,
     search_indexed_up_to: u64,
     search_match_k: u64,
@@ -660,6 +662,7 @@ impl TuiViewer {
             search_query: String::new(),
             search_pattern: None,
             search_include_rc: true,
+            search_scope: SearchScope::default(),
             search_index: Arc::new(Mutex::new(SearchIndex::new())),
             search_indexed_up_to: 0,
             search_match_k: 0,
@@ -883,6 +886,8 @@ impl TuiViewer {
         self.stop_search_worker_r2();
         self.search_pattern = None;
         self.search_query.clear();
+        // Reset the per-search reverse-complement toggle, but keep the scope:
+        // it is a sticky preference for how the user likes to search.
         self.search_include_rc = true;
         self.search_index.lock().unwrap().reset();
         self.search_indexed_up_to = 0;
@@ -908,7 +913,7 @@ impl TuiViewer {
         let len = reads.len() as u64;
         let mut index = self.search_index.lock().unwrap();
         for record_idx in self.search_indexed_up_to..len {
-            if pattern.has_match(reads[record_idx as usize].seq()) {
+            if self.search_scope.matches(&pattern, &reads[record_idx as usize]) {
                 index.set(record_idx);
             }
         }
@@ -919,7 +924,7 @@ impl TuiViewer {
             let len_r2 = reads_r2.len() as u64;
             let mut index_r2 = self.search_index_r2.lock().unwrap();
             for record_idx in self.search_indexed_up_to_r2..len_r2 {
-                if pattern.has_match(reads_r2[record_idx as usize].seq()) {
+                if self.search_scope.matches(&pattern, &reads_r2[record_idx as usize]) {
                     index_r2.set(record_idx);
                 }
             }
@@ -1026,10 +1031,19 @@ impl TuiViewer {
         let done = Arc::clone(&self.search_worker_done);
         let stop_flag = Arc::clone(&self.search_stop_flag);
         let file_path = self.file_path.clone();
+        let scope = self.search_scope;
 
         let handle = thread::spawn(move || {
             if let Err(e) =
-                Self::search_background(&pattern, &file_path, index, scanned, done, stop_flag)
+                Self::search_background(
+                    &pattern,
+                    scope,
+                    &file_path,
+                    index,
+                    scanned,
+                    done,
+                    stop_flag,
+                )
             {
                 eprintln!("Search error: {}", e);
             }
@@ -1064,10 +1078,19 @@ impl TuiViewer {
         let done = Arc::clone(&self.search_worker_done_r2);
         let stop_flag = Arc::clone(&self.search_stop_flag_r2);
         let file_path = self.file_path_r2.clone();
+        let scope = self.search_scope;
 
         let handle = thread::spawn(move || {
             if let Err(e) =
-                Self::search_background(&pattern, &file_path, index, scanned, done, stop_flag)
+                Self::search_background(
+                    &pattern,
+                    scope,
+                    &file_path,
+                    index,
+                    scanned,
+                    done,
+                    stop_flag,
+                )
             {
                 eprintln!("Search error (R2): {}", e);
             }
@@ -1087,6 +1110,7 @@ impl TuiViewer {
     /// buffer without storing anything but the one-bit-per-record index.
     fn search_background(
         pattern: &Pattern,
+        scope: SearchScope,
         file_path: &str,
         index: Arc<Mutex<SearchIndex>>,
         scanned: Arc<AtomicU64>,
@@ -1100,7 +1124,7 @@ impl TuiViewer {
                 return Ok(());
             }
             let record = record?;
-            if pattern.has_match(record.seq()) {
+            if scope.matches(pattern, &record) {
                 index.lock().unwrap().set(record_idx);
             }
             record_idx += 1;
@@ -1365,6 +1389,38 @@ impl TuiViewer {
         }
     }
 
+    /// Build a record header line. When the active search scope includes read
+    /// IDs, matching parts of the ID are highlighted in yellow; the
+    /// description (if any) is always plain.
+    fn header_line<'a>(&self, id: &str, desc: Option<&str>) -> Line<'a> {
+        let mut spans: Vec<Span<'a>> = Vec::new();
+        let ranges = if self.search_scope.includes_id() {
+            self.highlight_pattern()
+                .map(|p| p.find_id_matches(id.as_bytes()))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut pos = 0;
+        for (start, end) in ranges {
+            if start > pos {
+                spans.push(Span::raw(id[pos..start].to_string()));
+            }
+            spans.push(Span::styled(
+                id[start..end].to_string(),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ));
+            pos = end;
+        }
+        if pos < id.len() {
+            spans.push(Span::raw(id[pos..].to_string()));
+        }
+        if let Some(desc) = desc {
+            spans.push(Span::raw(format!(" {}", desc)));
+        }
+        Line::from(spans)
+    }
+
     /// Render a base as either its quality color or the search-match
     /// highlight (yellow background) when it falls inside a match range.
     fn base_span<'a>(&self, base: u8, quality: u8, highlighted: bool) -> Span<'a> {
@@ -1531,6 +1587,12 @@ impl TuiViewer {
                     Key::Char('x') => {
                         if self.search_pattern.is_some() && !self.show_translation {
                             self.search_include_rc = !self.search_include_rc;
+                            self.apply_search_pattern();
+                        }
+                    }
+                    Key::Char('i') => {
+                        if self.search_pattern.is_some() {
+                            self.search_scope = self.search_scope.next();
                             self.apply_search_pattern();
                         }
                     }
@@ -1754,12 +1816,7 @@ impl TuiViewer {
                 .buffer_r2
                 .get_window(self.current_position, max_visible + 5)?;
             for (r1, r2) in records_r1.iter().zip(records_r2.iter()) {
-                let name = if let Some(desc) = r1.desc() {
-                    format!("{} {}", r1.id(), desc)
-                } else {
-                    r1.id().to_string()
-                };
-                prepared_lines.push(Line::from(Span::styled(name, Style::default())));
+                prepared_lines.push(self.header_line(r1.id(), r1.desc()));
 
                 let (seq1, qual1) = self.oriented_seq_qual(r1);
                 let (seq2, qual2) = self.oriented_seq_qual(r2);
@@ -1905,12 +1962,7 @@ impl TuiViewer {
                 .buffer
                 .get_window(self.current_position, max_visible + 5)?;
             for record in records.iter() {
-                let name = if let Some(desc) = record.desc() {
-                    format!("{} {}", record.id(), desc)
-                } else {
-                    record.id().to_string()
-                };
-                prepared_lines.push(Line::from(Span::styled(name, Style::default())));
+                prepared_lines.push(self.header_line(record.id(), record.desc()));
                 let (oriented_seq, oriented_qual) = self.oriented_seq_qual(record);
 
                 if self.show_translation {
@@ -2019,6 +2071,11 @@ impl TuiViewer {
                 }
                 None => "",
             };
+            let scope_prefix = match self.search_scope {
+                SearchScope::Sequence => "",
+                SearchScope::Id => "id ",
+                SearchScope::SequenceAndId => "seq+id ",
+            };
             let scanning = if self.search_worker_done.load(Ordering::SeqCst) {
                 String::new()
             } else {
@@ -2030,26 +2087,31 @@ impl TuiViewer {
                 )
             };
             format!(
-                " | /{} {mode} {}/{}{}",
-                self.search_query, self.search_match_k, count, scanning
+                " | /{} {}{} {}/{}{}",
+                self.search_query, scope_prefix, mode, self.search_match_k, count, scanning
             )
         } else {
             String::new()
         };
 
+        let scope_hint = self.search_scope.label();
         let footer = if self.search_mode {
             format!("/{}▌", self.search_input)
         } else if self.search_pattern.as_ref().is_some_and(|p| p.is_peptide()) {
-            format!("{} | n/N: prev/next | /: Search | q: Quit", help_text)
+            format!(
+                "{} | n/N: prev/next | i: {} | /: Search | q: Quit",
+                help_text, scope_hint
+            )
         } else if self.search_pattern.is_some() {
             format!(
-                "{} | n/N: prev/next | x: {} | /: Search | q: Quit",
+                "{} | n/N: prev/next | x: {} | i: {} | /: Search | q: Quit",
                 help_text,
                 if self.search_include_rc {
                     "+RC"
                 } else {
                     "exact"
-                }
+                },
+                scope_hint
             )
         } else {
             help_text.to_string()
@@ -2269,6 +2331,9 @@ impl TuiViewer {
                     Line::from("  n          - Jump to next match"),
                     Line::from("  N          - Jump to previous match"),
                     Line::from("  x          - Toggle reverse-complement search (sequence view)"),
+                    Line::from(
+                        "  i          - Cycle search scope (sequence / read ID / both)",
+                    ),
                     Line::from("  Esc        - Cancel search"),
                     Line::from("  Enter      - Commit search and jump to first match"),
                     Line::from(""),

@@ -245,12 +245,64 @@ impl PeptidePattern {
     }
 }
 
+/// Which fields of a record a search matches against. The read ID is always
+/// matched literally (see [`Pattern::has_match_id`]); reverse-complement
+/// matching only applies to sequences.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SearchScope {
+    /// Match patterns against read sequences only.
+    Sequence,
+    /// Match patterns against read IDs only.
+    Id,
+    /// Match patterns against both read sequences and IDs.
+    SequenceAndId,
+}
+
+impl SearchScope {
+    /// Cycle to the next scope: sequence → id → both.
+    pub fn next(&self) -> Self {
+        match self {
+            SearchScope::Sequence => SearchScope::Id,
+            SearchScope::Id => SearchScope::SequenceAndId,
+            SearchScope::SequenceAndId => SearchScope::Sequence,
+        }
+    }
+
+    /// Short label for the status line.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SearchScope::Sequence => "seq",
+            SearchScope::Id => "id",
+            SearchScope::SequenceAndId => "seq+id",
+        }
+    }
+
+    /// True if the scope includes read IDs.
+    pub fn includes_id(&self) -> bool {
+        matches!(self, SearchScope::Id | SearchScope::SequenceAndId)
+    }
+
+    /// True if `pattern` matches `record` (sequence and/or ID, per scope).
+    pub fn matches(&self, pattern: &Pattern, record: &bio::io::fastq::Record) -> bool {
+        let seq_match = matches!(self, SearchScope::Sequence | SearchScope::SequenceAndId)
+            && pattern.has_match(record.seq());
+        let id_match = matches!(self, SearchScope::Id | SearchScope::SequenceAndId)
+            && pattern.has_match_id(record.id());
+        seq_match || id_match
+    }
+}
+
+impl Default for SearchScope {
+    fn default() -> Self {
+        SearchScope::Sequence
+    }
+}
+
 impl Pattern {
     /// Build a nucleotide pattern (see [`DnaPattern::new`]).
     pub fn new(input: &str, include_rc: bool) -> Option<Self> {
         DnaPattern::new(input, include_rc).map(Pattern::Dna)
     }
-
     /// Build a peptide pattern for searching translated frames.
     pub fn new_peptide(input: &str) -> Option<Self> {
         PeptidePattern::new(input).map(Pattern::Peptide)
@@ -259,6 +311,36 @@ impl Pattern {
     /// True if this is a peptide (amino acid) pattern.
     pub fn is_peptide(&self) -> bool {
         matches!(self, Pattern::Peptide(_))
+    }
+
+    /// True if the literal part of the pattern occurs in the read ID `id`.
+    /// The reverse complement is never tried: a read name is a label, not
+    /// DNA, so matching its revcomp would only produce noise.
+    pub fn has_match_id(&self, id: &[u8]) -> bool {
+        match self {
+            Pattern::Dna(p) => {
+                let lc: Vec<u8> = id.iter().map(|b| b.to_ascii_lowercase()).collect();
+                p.literal_bom.find_all(&lc).next().is_some()
+            }
+            Pattern::Peptide(p) => {
+                let lc: Vec<u8> = id.iter().map(|b| b.to_ascii_lowercase()).collect();
+                p.bom.find_all(&lc).next().is_some()
+            }
+        }
+    }
+
+    /// Find merged occurrences of the literal pattern in the read ID `id`.
+    /// Ranges are [start, end) byte offsets into `id`; the reverse
+    /// complement is never tried (see [`Pattern::has_match_id`]).
+    pub fn find_id_matches(&self, id: &[u8]) -> Vec<(usize, usize)> {
+        let lc: Vec<u8> = id.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let (bom, len) = match self {
+            Pattern::Dna(p) => (&p.literal_bom, p.literal.len()),
+            Pattern::Peptide(p) => (&p.bom, p.pep.len()),
+        };
+        let mut hits: Vec<(usize, usize)> =
+            bom.find_all(&lc).map(|s| (s, s + len)).collect();
+        merged_ranges(&mut hits)
     }
 
     /// True if any occurrence of the pattern appears in the nucleotide
@@ -517,5 +599,75 @@ mod tests {
     fn test_peptide_pattern_no_dna_matches() {
         let p = Pattern::new_peptide("CAR").unwrap();
         assert!(p.find_merged_matches(b"TGTGCTCGT").is_empty());
+    }
+
+    #[test]
+    fn test_has_match_id_literal_case_insensitive() {
+        let p = Pattern::new("read12", false).unwrap();
+        assert!(p.has_match_id(b"READ12:1:abc"));
+        assert!(p.has_match_id(b"read12:1:abc"));
+        assert!(!p.has_match_id(b"read13:1:abc"));
+    }
+
+    #[test]
+    fn test_has_match_id_never_tries_revcomp() {
+        let p = Pattern::new("atgc", true).unwrap();
+        assert!(p.has_match_id(b"read_ATGC"));
+        // rc(ATGC) = GCAT: a read name is a label, not DNA.
+        assert!(!p.has_match_id(b"read_GCAT"));
+    }
+
+    #[test]
+    fn test_has_match_id_peptide() {
+        let p = Pattern::new_peptide("CAR").unwrap();
+        assert!(p.has_match_id(b"sample_car_1"));
+        assert!(!p.has_match_id(b"sample_evq_1"));
+    }
+
+    #[test]
+    fn test_find_id_matches_ranges() {
+        let p = Pattern::new("abc", false).unwrap();
+        assert_eq!(p.find_id_matches(b"xxABCyyabc"), vec![(2, 5), (7, 10)]);
+        assert_eq!(p.find_id_matches(b"nothing_here"), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn test_find_id_matches_merges_overlaps() {
+        let p = Pattern::new("aa", false).unwrap();
+        assert_eq!(p.find_id_matches(b"AAA"), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn test_find_id_matches_peptide() {
+        let p = Pattern::new_peptide("CAR").unwrap();
+        assert_eq!(p.find_id_matches(b"x_car_y"), vec![(2, 5)]);
+    }
+
+    fn record(id: &str, seq: &str) -> bio::io::fastq::Record {
+        bio::io::fastq::Record::with_attrs(id, None, seq.as_bytes())
+    }
+
+    #[test]
+    fn test_search_scope_matches() {
+        let pattern = Pattern::new("acgt", false).unwrap();
+        let seq_match = record("read1", "TTACGTTT");
+        let id_match = record("sample_acgt_1", "TTTTTTTT");
+        let no_match = record("none", "GGGGGGGG");
+
+        assert!(SearchScope::Sequence.matches(&pattern, &seq_match));
+        assert!(!SearchScope::Sequence.matches(&pattern, &id_match));
+        assert!(!SearchScope::Id.matches(&pattern, &seq_match));
+        assert!(SearchScope::Id.matches(&pattern, &id_match));
+        assert!(SearchScope::SequenceAndId.matches(&pattern, &seq_match));
+        assert!(SearchScope::SequenceAndId.matches(&pattern, &id_match));
+        assert!(!SearchScope::SequenceAndId.matches(&pattern, &no_match));
+    }
+
+    #[test]
+    fn test_search_scope_next_cycles() {
+        assert_eq!(SearchScope::default(), SearchScope::Sequence);
+        assert_eq!(SearchScope::Sequence.next(), SearchScope::Id);
+        assert_eq!(SearchScope::Id.next(), SearchScope::SequenceAndId);
+        assert_eq!(SearchScope::SequenceAndId.next(), SearchScope::Sequence);
     }
 }
