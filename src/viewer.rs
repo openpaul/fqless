@@ -991,24 +991,12 @@ impl TuiViewer {
         let index = self.search_index.lock().unwrap();
         let index_r2 = self.search_index_r2.lock().unwrap();
 
-        // Build a combined bitmap: pair matches if either R1 or R2 matches
-        let max_idx = std::cmp::max(
-            self.buffer.reads.read().unwrap().len() as u64,
-            self.buffer_r2.reads.read().unwrap().len() as u64,
-        );
-        let mut combined = SearchIndex::new();
-        for i in 0..max_idx {
-            if index.test(i) || index_r2.test(i) {
-                combined.set(i);
-            }
-        }
-
         let target = if forward {
-            combined.next(self.current_position + 1)
+            index.next_union(&index_r2, self.current_position + 1)
         } else {
-            combined.prev(self.current_position)
+            index.prev_union(&index_r2, self.current_position)
         };
-        let k = target.map(|m| combined.count_up_to(m));
+        let k = target.map(|m| index.count_union_up_to(&index_r2, m));
         drop(index_r2);
         drop(index);
 

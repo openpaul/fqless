@@ -42,6 +42,7 @@ impl SearchIndex {
         }
     }
 
+    #[cfg(test)]
     pub fn test(&self, record: u64) -> bool {
         let word = (record / 64) as usize;
         let bit = record % 64;
@@ -69,6 +70,47 @@ impl SearchIndex {
                 (1u64 << (offset + 1)) - 1
             };
             total += (w & keep).count_ones() as u64;
+        }
+        total
+    }
+
+    /// First set bit at or after `from` in either index.
+    pub fn next_union(&self, other: &Self, from: u64) -> Option<u64> {
+        match (self.next(from), other.next(from)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Last set bit strictly below `below` in either index.
+    pub fn prev_union(&self, other: &Self, below: u64) -> Option<u64> {
+        match (self.prev(below), other.prev(below)) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Number of unique set bits with index <= `record` across both indexes.
+    pub fn count_union_up_to(&self, other: &Self, record: u64) -> u64 {
+        let word = (record / 64) as usize;
+        let offset = record % 64;
+        let max_len = self.bits.len().max(other.bits.len());
+        let full = word.min(max_len);
+        let mut total = 0u64;
+        for i in 0..full {
+            let a = self.bits.get(i).copied().unwrap_or(0);
+            let b = other.bits.get(i).copied().unwrap_or(0);
+            total += (a | b).count_ones() as u64;
+        }
+        if word < max_len {
+            let a = self.bits.get(word).copied().unwrap_or(0);
+            let b = other.bits.get(word).copied().unwrap_or(0);
+            let keep = if offset == 63 {
+                !0u64
+            } else {
+                (1u64 << (offset + 1)) - 1
+            };
+            total += ((a | b) & keep).count_ones() as u64;
         }
         total
     }
@@ -519,6 +561,34 @@ mod tests {
         assert_eq!(idx.count_up_to(65), 3);
         assert_eq!(idx.count_up_to(1000), 4);
         assert_eq!(idx.count_up_to(9999), 4);
+    }
+
+    #[test]
+    fn test_next_prev_union() {
+        let a = index_with(&[5, 100, 101]);
+        let b = index_with(&[7, 100, 200]);
+
+        assert_eq!(a.next_union(&b, 0), Some(5));
+        assert_eq!(a.next_union(&b, 6), Some(7));
+        assert_eq!(a.next_union(&b, 101), Some(101));
+        assert_eq!(a.next_union(&b, 201), None);
+
+        assert_eq!(a.prev_union(&b, 300), Some(200));
+        assert_eq!(a.prev_union(&b, 100), Some(7));
+        assert_eq!(a.prev_union(&b, 5), None);
+    }
+
+    #[test]
+    fn test_count_union_up_to() {
+        let a = index_with(&[5, 100, 101]);
+        let b = index_with(&[7, 100, 200]);
+
+        assert_eq!(a.count_union_up_to(&b, 0), 0);
+        assert_eq!(a.count_union_up_to(&b, 6), 1);
+        assert_eq!(a.count_union_up_to(&b, 100), 3);
+        assert_eq!(a.count_union_up_to(&b, 199), 4);
+        assert_eq!(a.count_union_up_to(&b, 200), 5);
+        assert_eq!(a.count_union_up_to(&b, 9999), 5);
     }
 
     #[test]
