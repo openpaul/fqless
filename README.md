@@ -101,4 +101,4 @@ So I am very glad if you submit issues. Best would be to supply a minimal workin
 
 ## LLM disclaimer
 
-Claude Sonnet 4.5 was used intermittely during development.
+Claude Sonnet 4.5, and DeepSeek  4.1 Flash have been used during development.
