@@ -47,6 +47,19 @@ use termion::{
 const BUFFER_WINDOW_SIZE: usize = 1000;
 const PAGE_SCROLL_AMOUNT: usize = 10;
 
+// Bins for the average-quality-per-read histogram: width 5, capped at Q40.
+// The stats worker increments these bins directly instead of keeping one
+// value per read, which would grow unboundedly for large files.
+const AVG_QUAL_BIN_WIDTH: usize = 5;
+const AVG_QUAL_MAX: usize = 40;
+const AVG_QUAL_NUM_BINS: usize = (AVG_QUAL_MAX / AVG_QUAL_BIN_WIDTH) + 1;
+
+/// Bin index in the average-quality histogram for a per-read average quality.
+fn average_quality_bin(avg_qual: f64) -> usize {
+    let idx = (avg_qual.max(0.0) as usize) / AVG_QUAL_BIN_WIDTH;
+    idx.min(AVG_QUAL_NUM_BINS - 1)
+}
+
 #[derive(Debug, Clone)]
 pub struct FastqStats {
     pub total_reads: u64,
@@ -59,8 +72,11 @@ pub struct FastqStats {
     pub gc_content: f64,
     pub n_content: f64,
     pub scanned_all: bool,
-    pub average_read_qualities: Vec<f64>, // Average quality score for each read (one value per read)
-    pub adapter_stats: AdapterStats,      // Adapter contamination statistics
+    /// Histogram of per-read average quality scores, binned with
+    /// [`AVG_QUAL_BIN_WIDTH`]. One entry per bin, so its size is
+    /// independent of the number of reads.
+    pub average_read_quality_histogram: Vec<u64>,
+    pub adapter_stats: AdapterStats, // Adapter contamination statistics
 }
 
 impl Default for FastqStats {
@@ -76,7 +92,7 @@ impl Default for FastqStats {
             gc_content: 0.0,
             n_content: 0.0,
             scanned_all: false,
-            average_read_qualities: Vec::new(),
+            average_read_quality_histogram: vec![0; AVG_QUAL_NUM_BINS],
             adapter_stats: AdapterStats::default(),
         }
     }
@@ -198,23 +214,14 @@ fn create_average_read_quality_histogram<'a>(
     stats: &FastqStats,
     color_scheme: &ColorScheme,
 ) -> BarChart<'a> {
-    // Create bins for average read qualities with bin width of 2
-    let bin_width = 5;
-    let max_qscore = 40; // Maximum quality score to consider
-    let num_bins = (max_qscore / bin_width) + 1; // +1 for the last "40+" bin
-    let mut bins = vec![0u64; num_bins];
+    let bars: Vec<Bar> = stats
+        .average_read_quality_histogram
+        .iter()
+        .enumerate()
+        .map(|(i, &count)| {
+            let range_start = i * AVG_QUAL_BIN_WIDTH;
 
-    for &avg_qual in &stats.average_read_qualities {
-        let bin_index = ((avg_qual as u8) / bin_width as u8).min((num_bins - 1) as u8) as usize;
-        bins[bin_index] += 1;
-    }
-
-    let bars: Vec<Bar> = (0..num_bins)
-        .map(|i| {
-            let range_start = i * bin_width;
-            let count = bins[i];
-
-            let label = if i == num_bins - 1 {
+            let label = if i == AVG_QUAL_NUM_BINS - 1 {
                 format!("Q{:.0}+", range_start) // Last bin is "40+"
             } else {
                 format!("Q{:.0}", range_start)
@@ -1164,7 +1171,7 @@ impl TuiViewer {
         let mut position_counts = Vec::new();
         let mut total_gc = 0u64;
         let mut total_n = 0u64;
-        let mut average_read_qualities = Vec::new();
+        let mut average_read_quality_histogram = vec![0u64; AVG_QUAL_NUM_BINS];
 
         // Initialize adapter detector
         let adapter_detector = AdapterDetector::new();
@@ -1249,7 +1256,7 @@ impl TuiViewer {
                 0.0
             };
 
-            average_read_qualities.push(average_quality);
+            average_read_quality_histogram[average_quality_bin(average_quality)] += 1;
 
             // Update stats every so often and check stop flag
             if total_reads.is_multiple_of(100000) {
@@ -1272,7 +1279,8 @@ impl TuiViewer {
 
                     // Update histograms (still expensive but only every 100k)
                     stats_lock.quality_histogram = quality_histogram.clone();
-                    stats_lock.average_read_qualities = average_read_qualities.clone();
+                    stats_lock.average_read_quality_histogram =
+                        average_read_quality_histogram.clone();
                     stats_lock.adapter_stats = local_adapter_stats.clone();
 
                     // Calculate position quality
@@ -1333,7 +1341,7 @@ impl TuiViewer {
                         }
                     })
                     .collect();
-                stats_lock.average_read_qualities = average_read_qualities;
+                stats_lock.average_read_quality_histogram = average_read_quality_histogram;
                 stats_lock.adapter_stats = local_adapter_stats;
                 stats_lock.scanned_all = true;
             }
@@ -2163,7 +2171,7 @@ impl TuiViewer {
                 if let Some(average_histogram_area) =
                     main_areas.get(1).and_then(|areas| areas.get(1))
                 {
-                    if !stats_lock.average_read_qualities.is_empty() {
+                    if stats_lock.processed_reads > 0 {
                         let average_quality_chart =
                             create_average_read_quality_histogram(&stats_lock, &self.color_scheme);
                         f.render_widget(average_quality_chart, *average_histogram_area);
