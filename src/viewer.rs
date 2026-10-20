@@ -864,6 +864,10 @@ impl TuiViewer {
                 return;
             }
         };
+        // Stop the previous worker before clearing the index; otherwise it can
+        // set bits from the old pattern/scope after the reset.
+        self.stop_search_worker();
+        self.stop_search_worker_r2();
         self.search_index.lock().unwrap().reset();
         self.search_indexed_up_to = 0;
         self.search_match_k = 0;
