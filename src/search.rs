@@ -215,6 +215,14 @@ impl DnaPattern {
         })
     }
 
+    /// True if every literal byte is a nucleotide code. Queries with other
+    /// characters are treated as read-name searches.
+    pub fn is_nucleotide_literal(&self) -> bool {
+        self.literal
+            .iter()
+            .all(|b| matches!(b, b'a' | b'c' | b'g' | b't' | b'u' | b'n'))
+    }
+
     /// Like the convenience matcher, but reuses `scratch`.
     pub fn has_match_with(&self, seq: &[u8], scratch: &mut MatchScratch) -> bool {
         let lc = scratch.sequence(seq);
@@ -329,22 +337,23 @@ impl MatchScratch {
     }
 }
 
-/// Which fields of a record a search matches against. The read ID is always
-/// matched literally (see [`Pattern::has_match_id_with`]); reverse-complement
-/// matching only applies to sequences.
+/// Which fields of a record a search matches against. The read name (ID and
+/// description) is always matched literally (see
+/// [`Pattern::has_match_name_with`]); reverse-complement matching only applies
+/// to sequences.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SearchScope {
     /// Match patterns against read sequences only.
     #[default]
     Sequence,
-    /// Match patterns against read IDs only.
+    /// Match patterns against read names only.
     Id,
-    /// Match patterns against both read sequences and IDs.
+    /// Match patterns against both read sequences and names.
     SequenceAndId,
 }
 
 impl SearchScope {
-    /// Cycle to the next scope: sequence → id → both.
+    /// Cycle to the next scope: sequence → name → both.
     pub fn next(&self) -> Self {
         match self {
             SearchScope::Sequence => SearchScope::Id,
@@ -357,12 +366,12 @@ impl SearchScope {
     pub fn label(&self) -> &'static str {
         match self {
             SearchScope::Sequence => "seq",
-            SearchScope::Id => "id",
-            SearchScope::SequenceAndId => "seq+id",
+            SearchScope::Id => "name",
+            SearchScope::SequenceAndId => "seq+name",
         }
     }
 
-    /// True if the scope includes read IDs.
+    /// True if the scope includes read names.
     pub fn includes_id(&self) -> bool {
         matches!(self, SearchScope::Id | SearchScope::SequenceAndId)
     }
@@ -383,7 +392,7 @@ impl SearchScope {
         let seq_match = matches!(self, SearchScope::Sequence | SearchScope::SequenceAndId)
             && pattern.has_match_with(record.seq(), scratch);
         let id_match = matches!(self, SearchScope::Id | SearchScope::SequenceAndId)
-            && pattern.has_match_id_with(record.id().as_bytes(), scratch);
+            && pattern.has_match_name_with(record.id().as_bytes(), record.desc(), scratch);
         seq_match || id_match
     }
 }
@@ -403,6 +412,15 @@ impl Pattern {
         matches!(self, Pattern::Peptide(_))
     }
 
+    /// True if the query consists only of nucleotide codes. Other queries are
+    /// probably read names and should search the header instead.
+    pub fn is_nucleotide_literal(&self) -> bool {
+        match self {
+            Pattern::Dna(p) => p.is_nucleotide_literal(),
+            Pattern::Peptide(_) => false,
+        }
+    }
+
     /// True if the literal part of the pattern occurs in the read ID `id`.
     /// The reverse complement is never tried: a read name is a label, not
     /// DNA, so matching its revcomp would only produce noise.
@@ -420,9 +438,21 @@ impl Pattern {
         }
     }
 
-    /// Find merged occurrences of the literal pattern in the read ID `id`.
-    /// Ranges are [start, end) byte offsets into `id`; the reverse
-    /// complement is never tried (see [`Pattern::has_match_id_with`]).
+    /// True if the literal pattern occurs in either the read ID or the
+    /// optional description from the FASTQ header.
+    pub fn has_match_name_with(
+        &self,
+        id: &[u8],
+        desc: Option<&str>,
+        scratch: &mut MatchScratch,
+    ) -> bool {
+        self.has_match_id_with(id, scratch)
+            || desc.is_some_and(|desc| self.has_match_id_with(desc.as_bytes(), scratch))
+    }
+
+    /// Find merged occurrences of the literal pattern in a read-name part.
+    /// Ranges are [start, end) byte offsets into `id`; the reverse complement
+    /// is never tried (see [`Pattern::has_match_id_with`]).
     pub fn find_id_matches(&self, id: &[u8]) -> Vec<(usize, usize)> {
         let mut scratch = MatchScratch::new();
         let lc = scratch.id(id);
@@ -772,8 +802,12 @@ mod tests {
     }
 
     fn record(id: &str, seq: &str) -> bio::io::fastq::Record {
+        record_with_desc(id, None, seq)
+    }
+
+    fn record_with_desc(id: &str, desc: Option<&str>, seq: &str) -> bio::io::fastq::Record {
         let qual = vec![b'I'; seq.len()];
-        bio::io::fastq::Record::with_attrs(id, None, seq.as_bytes(), &qual)
+        bio::io::fastq::Record::with_attrs(id, desc, seq.as_bytes(), &qual)
     }
 
     #[test]
@@ -790,6 +824,33 @@ mod tests {
         assert!(SearchScope::SequenceAndId.matches(&pattern, &seq_match));
         assert!(SearchScope::SequenceAndId.matches(&pattern, &id_match));
         assert!(!SearchScope::SequenceAndId.matches(&pattern, &no_match));
+    }
+
+    #[test]
+    fn test_search_scope_matches_description() {
+        let pattern = Pattern::new("HS2000", true).unwrap();
+        let name_match = record_with_desc(
+            "ERR1025601.10",
+            Some("HS2000-939_283:4:1111:16084:25717/1"),
+            "TTTTTTTT",
+        );
+
+        assert!(!SearchScope::Sequence.matches(&pattern, &name_match));
+        assert!(SearchScope::Id.matches(&pattern, &name_match));
+        assert!(SearchScope::SequenceAndId.matches(&pattern, &name_match));
+    }
+
+    #[test]
+    fn test_nucleotide_literal_detection() {
+        assert!(Pattern::new("ACGTN", true).unwrap().is_nucleotide_literal());
+        assert!(Pattern::new("acgtu", true).unwrap().is_nucleotide_literal());
+        assert!(!Pattern::new("HS2000", true)
+            .unwrap()
+            .is_nucleotide_literal());
+        assert!(!Pattern::new("ERR1025601.10", true)
+            .unwrap()
+            .is_nucleotide_literal());
+        assert!(!Pattern::new_peptide("CAR").unwrap().is_nucleotide_literal());
     }
 
     #[test]

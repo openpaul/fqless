@@ -129,8 +129,11 @@ pub struct TuiViewer {
     search_query: String,
     search_pattern: Option<Pattern>,
     search_include_rc: bool,
-    /// Which record fields the pattern matches: sequence, ID, or both.
+    /// Which record fields the pattern matches: sequence, name, or both.
     search_scope: SearchScope,
+    /// True when the scope was chosen automatically because the query looks
+    /// like a read name rather than a nucleotide sequence.
+    search_scope_auto: bool,
     search_index: Arc<Mutex<SearchIndex>>,
     search_indexed_up_to: u64,
     search_match_k: u64,
@@ -663,6 +666,7 @@ impl TuiViewer {
             search_pattern: None,
             search_include_rc: true,
             search_scope: SearchScope::default(),
+            search_scope_auto: false,
             search_index: Arc::new(Mutex::new(SearchIndex::new())),
             search_indexed_up_to: 0,
             search_match_k: 0,
@@ -812,16 +816,7 @@ impl TuiViewer {
                 self.apply_search_pattern();
                 // Like less: jump to the first match at or after the current
                 // position once the pattern is committed.
-                let target = self
-                    .search_index
-                    .lock()
-                    .unwrap()
-                    .next(self.current_position);
-                if let Some(m) = target {
-                    let k = self.search_index.lock().unwrap().count_up_to(m);
-                    self.search_match_k = k;
-                    let _ = self.jump_to_record(m);
-                }
+                self.jump_to_first_match();
             }
             Key::Char(c) => {
                 if !c.is_control() {
@@ -864,6 +859,19 @@ impl TuiViewer {
                 return;
             }
         };
+        // Name-like queries contain characters that are not nucleotide codes.
+        // Search the read name automatically instead of silently finding no
+        // sequence matches. A manual scope choice is left alone.
+        if !self.show_translation {
+            if self.search_scope_auto {
+                self.search_scope = SearchScope::Sequence;
+                self.search_scope_auto = false;
+            }
+            if self.search_scope == SearchScope::Sequence && !pattern.is_nucleotide_literal() {
+                self.search_scope = SearchScope::Id;
+                self.search_scope_auto = true;
+            }
+        }
         // Stop the previous worker before clearing the index; otherwise it can
         // set bits from the old pattern/scope after the reset.
         self.stop_search_worker();
@@ -958,6 +966,31 @@ impl TuiViewer {
             self.current_position = len - 1;
         }
         Ok(())
+    }
+
+    /// Jump to the match at or after the current position, including the
+    /// current record. Used when a search is committed or its scope changes.
+    fn jump_to_first_match(&mut self) {
+        let (target, k) = if self.is_paired {
+            let index = self.search_index.lock().unwrap();
+            let index_r2 = self.search_index_r2.lock().unwrap();
+            let target = index.next_union(&index_r2, self.current_position);
+            let k = target.map(|m| index.count_union_up_to(&index_r2, m));
+            (target, k)
+        } else {
+            let index = self.search_index.lock().unwrap();
+            let target = index.next(self.current_position);
+            let k = target.map(|m| index.count_up_to(m));
+            (target, k)
+        };
+
+        if let Some(m) = target {
+            self.search_match_k = k.unwrap_or(0);
+            if self.is_paired {
+                self.search_match_k_r2 = k.unwrap_or(0);
+            }
+            let _ = self.jump_to_record(m);
+        }
     }
 
     /// Move to the next (or previous) matching record relative to the current
@@ -1380,35 +1413,62 @@ impl TuiViewer {
     }
 
     /// Build a record header line. When the active search scope includes read
-    /// IDs, matching parts of the ID are highlighted in yellow; the
-    /// description (if any) is always plain.
+    /// names, matching parts of the ID and description are highlighted.
     fn header_line<'a>(&self, id: &str, desc: Option<&str>) -> Line<'a> {
         let mut spans: Vec<Span<'a>> = Vec::new();
-        let ranges = if self.search_scope.includes_id() {
+        let pattern = if self.search_scope.includes_id() {
             self.highlight_pattern()
-                .map(|p| p.find_id_matches(id.as_bytes()))
-                .unwrap_or_default()
         } else {
-            Vec::new()
+            None
         };
+
+        match pattern {
+            Some(pattern) => {
+                spans.extend(Self::highlighted_spans(
+                    id,
+                    &pattern.find_id_matches(id.as_bytes()),
+                ));
+                if let Some(desc) = desc {
+                    spans.push(Span::raw(" "));
+                    spans.extend(Self::highlighted_spans(
+                        desc,
+                        &pattern.find_id_matches(desc.as_bytes()),
+                    ));
+                }
+            }
+            None => {
+                spans.push(Span::raw(id.to_string()));
+                if let Some(desc) = desc {
+                    spans.push(Span::raw(format!(" {}", desc)));
+                }
+            }
+        }
+
+        Line::from(spans)
+    }
+
+    /// Split `text` into plain and yellow-highlighted spans using byte ranges.
+    fn highlighted_spans<'a>(text: &str, ranges: &[(usize, usize)]) -> Vec<Span<'a>> {
+        if ranges.is_empty() {
+            return vec![Span::raw(text.to_string())];
+        }
+
+        let mut spans = Vec::new();
         let mut pos = 0;
-        for (start, end) in ranges {
+        for &(start, end) in ranges {
             if start > pos {
-                spans.push(Span::raw(id[pos..start].to_string()));
+                spans.push(Span::raw(text[pos..start].to_string()));
             }
             spans.push(Span::styled(
-                id[start..end].to_string(),
+                text[start..end].to_string(),
                 Style::default().fg(Color::Black).bg(Color::Yellow),
             ));
             pos = end;
         }
-        if pos < id.len() {
-            spans.push(Span::raw(id[pos..].to_string()));
+        if pos < text.len() {
+            spans.push(Span::raw(text[pos..].to_string()));
         }
-        if let Some(desc) = desc {
-            spans.push(Span::raw(format!(" {}", desc)));
-        }
-        Line::from(spans)
+        spans
     }
 
     /// Render a base as either its quality color or the search-match
@@ -1583,7 +1643,9 @@ impl TuiViewer {
                     Key::Char('i') => {
                         if self.search_pattern.is_some() {
                             self.search_scope = self.search_scope.next();
+                            self.search_scope_auto = false;
                             self.apply_search_pattern();
+                            self.jump_to_first_match();
                         }
                     }
                     Key::Char('c') => {
@@ -2063,8 +2125,8 @@ impl TuiViewer {
             };
             let scope_prefix = match self.search_scope {
                 SearchScope::Sequence => "",
-                SearchScope::Id => "id ",
-                SearchScope::SequenceAndId => "seq+id ",
+                SearchScope::Id => "name ",
+                SearchScope::SequenceAndId => "seq+name ",
             };
             let scanning = if self.search_worker_done.load(Ordering::SeqCst) {
                 String::new()
@@ -2321,7 +2383,7 @@ impl TuiViewer {
                     Line::from("  n          - Jump to next match"),
                     Line::from("  N          - Jump to previous match"),
                     Line::from("  x          - Toggle reverse-complement search (sequence view)"),
-                    Line::from("  i          - Cycle search scope (sequence / read ID / both)"),
+                    Line::from("  i          - Cycle search scope (sequence / read name / both)"),
                     Line::from("  Esc        - Cancel search"),
                     Line::from("  Enter      - Commit search and jump to first match"),
                     Line::from(""),
