@@ -1,7 +1,7 @@
 use crate::adapter::{AdapterDetector, AdapterStats};
 use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
-use crate::reader::FastqReader;
+use crate::reader::{FastqReader, RecordReader};
 use crate::search::{MatchScratch, Pattern, SearchIndex, SearchScope};
 use crate::utils::{
     calculate_record_lines, determine_min_max_phred, translate_frames,
@@ -1113,15 +1113,14 @@ impl TuiViewer {
         done: Arc<AtomicBool>,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<()> {
-        let reader = FastqReader::new(file_path)?;
+        let mut reader = RecordReader::new(FastqReader::new(file_path)?.into_fastq_reader());
         let mut record_idx = 0u64;
         let mut scratch = MatchScratch::new();
-        for record in reader.into_fastq_reader().records() {
+        while let Some(record) = reader.next_record()? {
             if stop_flag.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let record = record?;
-            if scope.matches_with(pattern, &record, &mut scratch) {
+            if scope.matches_with(pattern, record, &mut scratch) {
                 index.lock().unwrap().set(record_idx);
             }
             record_idx += 1;
@@ -1145,12 +1144,10 @@ impl TuiViewer {
             return Ok(());
         }
 
-        let reader = FastqReader::new(file_path)?;
+        let mut reader = RecordReader::new(FastqReader::new(file_path)?.into_fastq_reader());
         let mut total_reads = 0u64;
 
-        for record in reader.into_fastq_reader().records() {
-            let _ = record?;
-
+        while reader.next_record()?.is_some() {
             if stop_flag.load(Ordering::Relaxed) {
                 return Ok(());
             }
@@ -1198,124 +1195,132 @@ impl TuiViewer {
         let adapter_detector = AdapterDetector::new();
         let mut local_adapter_stats = AdapterStats::default();
 
-        // if file_path is "-", we are reading from stdin so we use the arc reads
-        // otherwise we make a new FastqReader
         let is_stdin = file_path == "-";
 
-        let reads: Box<dyn Iterator<Item = Result<bio::io::fastq::Record, bio::io::fastq::Error>>> =
-            if is_stdin {
-                let guard = reads.read().unwrap();
-                let records = guard.clone().into_iter().map(Ok);
-                Box::new(records)
-            } else {
-                let reader = FastqReader::new(file_path)?;
-                Box::new(reader.into_fastq_reader().records())
-            };
-        for record in reads {
-            let record = record?;
-            if stop_flag.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-
-            total_reads += 1;
-            let seq_len = record.seq().len();
-            total_length += seq_len as u64;
-            min_length = min_length.min(seq_len);
-            max_length = max_length.max(seq_len);
-
-            let seq = record.seq();
-            let qual = record.qual();
-
-            // Combined pass through sequence for GC/N content and adapter detection
-            // This is more cache-friendly than separate passes
-            let mut gc_count = 0u64;
-            let mut n_count = 0u64;
-
-            // Fast GC/N counting
-            for &base in seq {
-                match base {
-                    b'G' | b'g' | b'C' | b'c' => gc_count += 1,
-                    b'N' | b'n' => n_count += 1,
-                    _ => {}
-                }
-            }
-
-            total_gc += gc_count;
-            total_n += n_count;
-
-            // Detect adapters in every read
-            let adapter_detections = adapter_detector.detect_adapters(seq);
-            adapter_detector.update_stats(&mut local_adapter_stats, &adapter_detections);
-
-            // Process quality scores with optimized loop
-            let base_phred = phred_range.base_phred();
-            let mut total_qual = 0u32;
-
-            // Ensure position vectors are large enough upfront
-            if seq_len > position_quality_sums.len() {
-                position_quality_sums.resize(seq_len, 0.0);
-                position_counts.resize(seq_len, 0);
-            }
-
-            for (pos, &qual_val) in qual.iter().enumerate() {
-                let quality_score = qual_val.saturating_sub(base_phred);
-                total_qual += quality_score as u32;
-
-                // Update histogram
-                if (quality_score as usize) < quality_histogram.len() {
-                    quality_histogram[quality_score as usize] += 1;
-                }
-
-                // Update position-wise quality (no bounds checking needed now)
-                position_quality_sums[pos] += quality_score as f64;
-                position_counts[pos] += 1;
-            }
-
-            let average_quality = if seq_len > 0 {
-                total_qual as f64 / seq_len as f64
-            } else {
-                0.0
-            };
-
-            average_read_quality_histogram[average_quality_bin(average_quality)] += 1;
-
-            // Update stats every so often and check stop flag
-            if total_reads.is_multiple_of(100000) {
+        {
+            let mut process_record = |record: &fastq::Record| -> Result<bool> {
                 if stop_flag.load(Ordering::Relaxed) {
-                    return Ok(());
+                    return Ok(false);
                 }
 
-                // Update all stats including histograms, but only every 100k reads
-                if let Ok(mut stats_lock) = stats.lock() {
-                    stats_lock.processed_reads = total_reads;
-                    stats_lock.avg_length = total_length as f64 / total_reads as f64;
-                    stats_lock.min_length = if min_length == usize::MAX {
-                        0
-                    } else {
-                        min_length
-                    };
-                    stats_lock.max_length = max_length;
-                    stats_lock.gc_content = (total_gc as f64 / total_length as f64) * 100.0;
-                    stats_lock.n_content = (total_n as f64 / total_length as f64) * 100.0;
+                total_reads += 1;
+                let seq_len = record.seq().len();
+                total_length += seq_len as u64;
+                min_length = min_length.min(seq_len);
+                max_length = max_length.max(seq_len);
 
-                    // Update histograms (still expensive but only every 100k)
-                    stats_lock.quality_histogram = quality_histogram.clone();
-                    stats_lock.average_read_quality_histogram =
-                        average_read_quality_histogram.clone();
-                    stats_lock.adapter_stats = local_adapter_stats.clone();
+                let seq = record.seq();
+                let qual = record.qual();
 
-                    // Calculate position quality
-                    stats_lock.position_quality = position_quality_sums
-                        .iter()
-                        .zip(position_counts.iter())
-                        .map(|(sum, count)| {
-                            if *count > 0 {
-                                sum / (*count as f64)
-                            } else {
-                                0.0
-                            }
-                        })
-                        .collect();
+                // Combined pass through sequence for GC/N content and adapter detection
+                // This is more cache-friendly than separate passes
+                let mut gc_count = 0u64;
+                let mut n_count = 0u64;
+
+                // Fast GC/N counting
+                for &base in seq {
+                    match base {
+                        b'G' | b'g' | b'C' | b'c' => gc_count += 1,
+                        b'N' | b'n' => n_count += 1,
+                        _ => {}
+                    }
+                }
+
+                total_gc += gc_count;
+                total_n += n_count;
+
+                // Detect adapters in every read
+                let adapter_detections = adapter_detector.detect_adapters(seq);
+                adapter_detector.update_stats(&mut local_adapter_stats, &adapter_detections);
+
+                // Process quality scores with optimized loop
+                let base_phred = phred_range.base_phred();
+                let mut total_qual = 0u32;
+
+                // Ensure position vectors are large enough upfront
+                if seq_len > position_quality_sums.len() {
+                    position_quality_sums.resize(seq_len, 0.0);
+                    position_counts.resize(seq_len, 0);
+                }
+
+                for (pos, &qual_val) in qual.iter().enumerate() {
+                    let quality_score = qual_val.saturating_sub(base_phred);
+                    total_qual += quality_score as u32;
+
+                    // Update histogram
+                    if (quality_score as usize) < quality_histogram.len() {
+                        quality_histogram[quality_score as usize] += 1;
+                    }
+
+                    // Update position-wise quality (no bounds checking needed now)
+                    position_quality_sums[pos] += quality_score as f64;
+                    position_counts[pos] += 1;
+                }
+
+                let average_quality = if seq_len > 0 {
+                    total_qual as f64 / seq_len as f64
+                } else {
+                    0.0
+                };
+
+                average_read_quality_histogram[average_quality_bin(average_quality)] += 1;
+
+                // Update stats every so often and check stop flag
+                if total_reads.is_multiple_of(100000) {
+                    if stop_flag.load(Ordering::Relaxed) {
+                        return Ok(false);
+                    }
+
+                    // Update all stats including histograms, but only every 100k reads
+                    if let Ok(mut stats_lock) = stats.lock() {
+                        stats_lock.processed_reads = total_reads;
+                        stats_lock.avg_length = total_length as f64 / total_reads as f64;
+                        stats_lock.min_length = if min_length == usize::MAX {
+                            0
+                        } else {
+                            min_length
+                        };
+                        stats_lock.max_length = max_length;
+                        stats_lock.gc_content = (total_gc as f64 / total_length as f64) * 100.0;
+                        stats_lock.n_content = (total_n as f64 / total_length as f64) * 100.0;
+
+                        // Update histograms (still expensive but only every 100k)
+                        stats_lock.quality_histogram = quality_histogram.clone();
+                        stats_lock.average_read_quality_histogram =
+                            average_read_quality_histogram.clone();
+                        stats_lock.adapter_stats = local_adapter_stats.clone();
+
+                        // Calculate position quality
+                        stats_lock.position_quality = position_quality_sums
+                            .iter()
+                            .zip(position_counts.iter())
+                            .map(|(sum, count)| {
+                                if *count > 0 {
+                                    sum / (*count as f64)
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .collect();
+                    }
+                }
+                Ok(true)
+            };
+
+            if is_stdin {
+                let snapshot = reads.read().unwrap().clone();
+                for record in snapshot.iter() {
+                    if !process_record(record)? {
+                        return Ok(());
+                    }
+                }
+            } else {
+                let mut reader =
+                    RecordReader::new(FastqReader::new(file_path)?.into_fastq_reader());
+                while let Some(record) = reader.next_record()? {
+                    if !process_record(record)? {
+                        return Ok(());
+                    }
                 }
             }
         }

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use bio::io::fastq;
+use bio::io::fastq::{self, FastqRead};
 use flate2::bufread::MultiGzDecoder;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek};
@@ -56,6 +56,36 @@ impl FastqReader {
     /// Get a new FASTQ reader for this input (consumes self)
     pub fn into_fastq_reader(self) -> fastq::Reader<BufReader<Box<dyn BufRead>>> {
         fastq::Reader::new(self.inner)
+    }
+}
+
+/// Reads into one reusable record. Prefer this over `records()` for whole-file
+/// scans: `records()` allocates a fresh `Record` for every read.
+pub struct RecordReader<R: BufRead> {
+    reader: fastq::Reader<R>,
+    record: fastq::Record,
+    done: bool,
+}
+
+impl<R: BufRead> RecordReader<R> {
+    pub fn new(reader: fastq::Reader<R>) -> Self {
+        Self {
+            reader,
+            record: fastq::Record::new(),
+            done: false,
+        }
+    }
+
+    pub fn next_record(&mut self) -> Result<Option<&fastq::Record>> {
+        if self.done {
+            return Ok(None);
+        }
+        self.reader.read(&mut self.record)?;
+        if self.record.is_empty() {
+            self.done = true;
+            return Ok(None);
+        }
+        Ok(Some(&self.record))
     }
 }
 
@@ -202,6 +232,29 @@ mod tests {
             .expect("Failed to read second record");
         assert_eq!(record2.id(), "SEQ2");
         assert_eq!(record2.seq(), b"ACGTACGT");
+    }
+
+    #[test]
+    fn test_record_reader_reuses_one_record() {
+        let content = "@A\nAAAA\n+\nIIII\n@B\nCCCC\n+\nIIII\n";
+        let temp_file = create_temp_fastq(content);
+        let path = temp_file.path().to_str().unwrap();
+        let reader = FastqReader::new(path).expect("Failed to create FastqReader");
+        let mut records = RecordReader::new(reader.into_fastq_reader());
+
+        let (id1, seq_ptr1) = {
+            let record = records.next_record().unwrap().unwrap();
+            (record.id().to_string(), record.seq().as_ptr())
+        };
+        let (id2, seq_ptr2) = {
+            let record = records.next_record().unwrap().unwrap();
+            (record.id().to_string(), record.seq().as_ptr())
+        };
+
+        assert_eq!(id1, "A");
+        assert_eq!(id2, "B");
+        assert_eq!(seq_ptr1, seq_ptr2, "record buffer should be reused");
+        assert!(records.next_record().unwrap().is_none());
     }
 
     #[test]
