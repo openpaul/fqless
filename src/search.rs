@@ -248,9 +248,10 @@ impl PeptidePattern {
 /// Which fields of a record a search matches against. The read ID is always
 /// matched literally (see [`Pattern::has_match_id`]); reverse-complement
 /// matching only applies to sequences.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SearchScope {
     /// Match patterns against read sequences only.
+    #[default]
     Sequence,
     /// Match patterns against read IDs only.
     Id,
@@ -287,14 +288,8 @@ impl SearchScope {
         let seq_match = matches!(self, SearchScope::Sequence | SearchScope::SequenceAndId)
             && pattern.has_match(record.seq());
         let id_match = matches!(self, SearchScope::Id | SearchScope::SequenceAndId)
-            && pattern.has_match_id(record.id());
+            && pattern.has_match_id(record.id().as_bytes());
         seq_match || id_match
-    }
-}
-
-impl Default for SearchScope {
-    fn default() -> Self {
-        SearchScope::Sequence
     }
 }
 
@@ -338,8 +333,7 @@ impl Pattern {
             Pattern::Dna(p) => (&p.literal_bom, p.literal.len()),
             Pattern::Peptide(p) => (&p.bom, p.pep.len()),
         };
-        let mut hits: Vec<(usize, usize)> =
-            bom.find_all(&lc).map(|s| (s, s + len)).collect();
+        let mut hits: Vec<(usize, usize)> = bom.find_all(&lc).map(|s| (s, s + len)).collect();
         merged_ranges(&mut hits)
     }
 
@@ -628,7 +622,10 @@ mod tests {
     fn test_find_id_matches_ranges() {
         let p = Pattern::new("abc", false).unwrap();
         assert_eq!(p.find_id_matches(b"xxABCyyabc"), vec![(2, 5), (7, 10)]);
-        assert_eq!(p.find_id_matches(b"nothing_here"), Vec::<(usize, usize)>::new());
+        assert_eq!(
+            p.find_id_matches(b"nothing_here"),
+            Vec::<(usize, usize)>::new()
+        );
     }
 
     #[test]
@@ -644,7 +641,8 @@ mod tests {
     }
 
     fn record(id: &str, seq: &str) -> bio::io::fastq::Record {
-        bio::io::fastq::Record::with_attrs(id, None, seq.as_bytes())
+        let qual = vec![b'I'; seq.len()];
+        bio::io::fastq::Record::with_attrs(id, None, seq.as_bytes(), &qual)
     }
 
     #[test]

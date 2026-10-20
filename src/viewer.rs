@@ -917,7 +917,10 @@ impl TuiViewer {
         let len = reads.len() as u64;
         let mut index = self.search_index.lock().unwrap();
         for record_idx in self.search_indexed_up_to..len {
-            if self.search_scope.matches(&pattern, &reads[record_idx as usize]) {
+            if self
+                .search_scope
+                .matches(&pattern, &reads[record_idx as usize])
+            {
                 index.set(record_idx);
             }
         }
@@ -928,7 +931,10 @@ impl TuiViewer {
             let len_r2 = reads_r2.len() as u64;
             let mut index_r2 = self.search_index_r2.lock().unwrap();
             for record_idx in self.search_indexed_up_to_r2..len_r2 {
-                if self.search_scope.matches(&pattern, &reads_r2[record_idx as usize]) {
+                if self
+                    .search_scope
+                    .matches(&pattern, &reads_r2[record_idx as usize])
+                {
                     index_r2.set(record_idx);
                 }
             }
@@ -1038,17 +1044,9 @@ impl TuiViewer {
         let scope = self.search_scope;
 
         let handle = thread::spawn(move || {
-            if let Err(e) =
-                Self::search_background(
-                    &pattern,
-                    scope,
-                    &file_path,
-                    index,
-                    scanned,
-                    done,
-                    stop_flag,
-                )
-            {
+            if let Err(e) = Self::search_background(
+                &pattern, scope, &file_path, index, scanned, done, stop_flag,
+            ) {
                 eprintln!("Search error: {}", e);
             }
         });
@@ -1085,17 +1083,9 @@ impl TuiViewer {
         let scope = self.search_scope;
 
         let handle = thread::spawn(move || {
-            if let Err(e) =
-                Self::search_background(
-                    &pattern,
-                    scope,
-                    &file_path,
-                    index,
-                    scanned,
-                    done,
-                    stop_flag,
-                )
-            {
+            if let Err(e) = Self::search_background(
+                &pattern, scope, &file_path, index, scanned, done, stop_flag,
+            ) {
                 eprintln!("Search error (R2): {}", e);
             }
         });
@@ -2335,9 +2325,7 @@ impl TuiViewer {
                     Line::from("  n          - Jump to next match"),
                     Line::from("  N          - Jump to previous match"),
                     Line::from("  x          - Toggle reverse-complement search (sequence view)"),
-                    Line::from(
-                        "  i          - Cycle search scope (sequence / read ID / both)",
-                    ),
+                    Line::from("  i          - Cycle search scope (sequence / read ID / both)"),
                     Line::from("  Esc        - Cancel search"),
                     Line::from("  Enter      - Commit search and jump to first match"),
                     Line::from(""),
