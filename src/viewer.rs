@@ -2,7 +2,7 @@ use crate::adapter::{AdapterDetector, AdapterStats};
 use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
 use crate::reader::FastqReader;
-use crate::search::{Pattern, SearchIndex, SearchScope};
+use crate::search::{MatchScratch, Pattern, SearchIndex, SearchScope};
 use crate::utils::{
     calculate_record_lines, determine_min_max_phred, translate_frames,
     translate_frames_with_quality, PhredRange, ReadOrientation,
@@ -916,10 +916,11 @@ impl TuiViewer {
         let reads = self.buffer.reads.read().unwrap();
         let len = reads.len() as u64;
         let mut index = self.search_index.lock().unwrap();
+        let mut scratch = MatchScratch::new();
         for record_idx in self.search_indexed_up_to..len {
             if self
                 .search_scope
-                .matches(&pattern, &reads[record_idx as usize])
+                .matches_with(&pattern, &reads[record_idx as usize], &mut scratch)
             {
                 index.set(record_idx);
             }
@@ -931,10 +932,11 @@ impl TuiViewer {
             let len_r2 = reads_r2.len() as u64;
             let mut index_r2 = self.search_index_r2.lock().unwrap();
             for record_idx in self.search_indexed_up_to_r2..len_r2 {
-                if self
-                    .search_scope
-                    .matches(&pattern, &reads_r2[record_idx as usize])
-                {
+                if self.search_scope.matches_with(
+                    &pattern,
+                    &reads_r2[record_idx as usize],
+                    &mut scratch,
+                ) {
                     index_r2.set(record_idx);
                 }
             }
@@ -1113,12 +1115,13 @@ impl TuiViewer {
     ) -> Result<()> {
         let reader = FastqReader::new(file_path)?;
         let mut record_idx = 0u64;
+        let mut scratch = MatchScratch::new();
         for record in reader.into_fastq_reader().records() {
             if stop_flag.load(Ordering::Relaxed) {
                 return Ok(());
             }
             let record = record?;
-            if scope.matches(pattern, &record) {
+            if scope.matches_with(pattern, &record, &mut scratch) {
                 index.lock().unwrap().set(record_idx);
             }
             record_idx += 1;

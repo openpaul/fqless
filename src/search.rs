@@ -173,28 +173,36 @@ impl DnaPattern {
         })
     }
 
-    /// True if any occurrence of the pattern (or its reverse complement)
-    /// appears in `seq`.
-    pub fn has_match(&self, seq: &[u8]) -> bool {
-        let lc: Vec<u8> = seq.iter().map(|b| b.to_ascii_lowercase()).collect();
-        if self.literal_bom.find_all(&lc).next().is_some() {
-            return true;
-        }
-        self.rc_bom
-            .as_ref()
-            .is_some_and(|bom| bom.find_all(&lc).next().is_some())
+    /// Like the convenience matcher, but reuses `scratch`.
+    pub fn has_match_with(&self, seq: &[u8], scratch: &mut MatchScratch) -> bool {
+        let lc = scratch.sequence(seq);
+        self.matches_lowercase(lc)
+    }
+
+    /// Literal-only match against already-lowercased bytes.
+    fn literal_matches_lowercase(&self, lc: &[u8]) -> bool {
+        self.literal_bom.find_all(lc).next().is_some()
+    }
+
+    fn matches_lowercase(&self, lc: &[u8]) -> bool {
+        self.literal_matches_lowercase(lc)
+            || self
+                .rc_bom
+                .as_ref()
+                .is_some_and(|bom| bom.find_all(lc).next().is_some())
     }
 
     /// Find all matches in `seq`, merging overlapping and adjacent hits into
     /// contiguous ranges. Ranges are [start, end) byte offsets into `seq`.
     pub fn find_merged_matches(&self, seq: &[u8]) -> Vec<(usize, usize)> {
-        let lc: Vec<u8> = seq.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let mut scratch = MatchScratch::new();
+        let lc = scratch.sequence(seq);
         let mut hits: Vec<(usize, usize)> = Vec::new();
-        for start in self.literal_bom.find_all(&lc) {
+        for start in self.literal_bom.find_all(lc) {
             hits.push((start, start + self.literal.len()));
         }
         if let Some(rc) = &self.rc_bom {
-            for start in rc.find_all(&lc) {
+            for start in rc.find_all(lc) {
                 hits.push((start, start + self.literal.len()));
             }
         }
@@ -226,27 +234,61 @@ impl PeptidePattern {
         Some(Self { pep, bom })
     }
 
-    /// True if any occurrence of the peptide appears in the frame.
-    pub fn has_match(&self, frame: &[u8]) -> bool {
-        let lc: Vec<u8> = frame.iter().map(|b| b.to_ascii_lowercase()).collect();
-        self.bom.find_all(&lc).next().is_some()
+    /// Like the convenience matcher, but reuses `scratch`.
+    pub fn has_match_with(&self, frame: &[u8], scratch: &mut MatchScratch) -> bool {
+        let lc = scratch.sequence(frame);
+        self.matches_lowercase(lc)
+    }
+
+    fn matches_lowercase(&self, lc: &[u8]) -> bool {
+        self.bom.find_all(lc).next().is_some()
     }
 
     /// Find all matches in a translated frame, merging overlapping and
     /// adjacent hits into contiguous ranges. Ranges are [start, end) byte
     /// offsets into the frame.
     pub fn find_merged_matches(&self, frame: &[u8]) -> Vec<(usize, usize)> {
-        let lc: Vec<u8> = frame.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let mut scratch = MatchScratch::new();
+        let lc = scratch.sequence(frame);
         let mut hits: Vec<(usize, usize)> = Vec::new();
-        for start in self.bom.find_all(&lc) {
+        for start in self.bom.find_all(lc) {
             hits.push((start, start + self.pep.len()));
         }
         merged_ranges(&mut hits)
     }
 }
 
+/// Reusable lowercase buffers; hot loops keep one instead of allocating per
+/// sequence and read ID.
+#[derive(Default)]
+pub struct MatchScratch {
+    seq: Vec<u8>,
+    id: Vec<u8>,
+}
+
+impl MatchScratch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn fill<'a>(buf: &'a mut Vec<u8>, bytes: &[u8]) -> &'a [u8] {
+        buf.clear();
+        buf.extend_from_slice(bytes);
+        buf.make_ascii_lowercase();
+        buf
+    }
+
+    pub fn sequence(&mut self, bytes: &[u8]) -> &[u8] {
+        Self::fill(&mut self.seq, bytes)
+    }
+
+    pub fn id(&mut self, bytes: &[u8]) -> &[u8] {
+        Self::fill(&mut self.id, bytes)
+    }
+}
+
 /// Which fields of a record a search matches against. The read ID is always
-/// matched literally (see [`Pattern::has_match_id`]); reverse-complement
+/// matched literally (see [`Pattern::has_match_id_with`]); reverse-complement
 /// matching only applies to sequences.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SearchScope {
@@ -283,12 +325,23 @@ impl SearchScope {
         matches!(self, SearchScope::Id | SearchScope::SequenceAndId)
     }
 
-    /// True if `pattern` matches `record` (sequence and/or ID, per scope).
+    /// Convenience wrapper for tests.
+    #[cfg(test)]
     pub fn matches(&self, pattern: &Pattern, record: &bio::io::fastq::Record) -> bool {
+        self.matches_with(pattern, record, &mut MatchScratch::new())
+    }
+
+    /// Like the convenience wrapper, but reuses `scratch` (hot loop variant).
+    pub fn matches_with(
+        &self,
+        pattern: &Pattern,
+        record: &bio::io::fastq::Record,
+        scratch: &mut MatchScratch,
+    ) -> bool {
         let seq_match = matches!(self, SearchScope::Sequence | SearchScope::SequenceAndId)
-            && pattern.has_match(record.seq());
+            && pattern.has_match_with(record.seq(), scratch);
         let id_match = matches!(self, SearchScope::Id | SearchScope::SequenceAndId)
-            && pattern.has_match_id(record.id().as_bytes());
+            && pattern.has_match_id_with(record.id().as_bytes(), scratch);
         seq_match || id_match
     }
 }
@@ -311,29 +364,31 @@ impl Pattern {
     /// True if the literal part of the pattern occurs in the read ID `id`.
     /// The reverse complement is never tried: a read name is a label, not
     /// DNA, so matching its revcomp would only produce noise.
+    #[cfg(test)]
     pub fn has_match_id(&self, id: &[u8]) -> bool {
+        self.has_match_id_with(id, &mut MatchScratch::new())
+    }
+
+    /// Like the convenience matcher, but reuses `scratch`.
+    pub fn has_match_id_with(&self, id: &[u8], scratch: &mut MatchScratch) -> bool {
+        let lc = scratch.id(id);
         match self {
-            Pattern::Dna(p) => {
-                let lc: Vec<u8> = id.iter().map(|b| b.to_ascii_lowercase()).collect();
-                p.literal_bom.find_all(&lc).next().is_some()
-            }
-            Pattern::Peptide(p) => {
-                let lc: Vec<u8> = id.iter().map(|b| b.to_ascii_lowercase()).collect();
-                p.bom.find_all(&lc).next().is_some()
-            }
+            Pattern::Dna(p) => p.literal_matches_lowercase(lc),
+            Pattern::Peptide(p) => p.matches_lowercase(lc),
         }
     }
 
     /// Find merged occurrences of the literal pattern in the read ID `id`.
     /// Ranges are [start, end) byte offsets into `id`; the reverse
-    /// complement is never tried (see [`Pattern::has_match_id`]).
+    /// complement is never tried (see [`Pattern::has_match_id_with`]).
     pub fn find_id_matches(&self, id: &[u8]) -> Vec<(usize, usize)> {
-        let lc: Vec<u8> = id.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let mut scratch = MatchScratch::new();
+        let lc = scratch.id(id);
         let (bom, len) = match self {
             Pattern::Dna(p) => (&p.literal_bom, p.literal.len()),
             Pattern::Peptide(p) => (&p.bom, p.pep.len()),
         };
-        let mut hits: Vec<(usize, usize)> = bom.find_all(&lc).map(|s| (s, s + len)).collect();
+        let mut hits: Vec<(usize, usize)> = bom.find_all(lc).map(|s| (s, s + len)).collect();
         merged_ranges(&mut hits)
     }
 
@@ -341,12 +396,18 @@ impl Pattern {
     /// record `seq`. Peptide patterns match when the peptide occurs in any of
     /// the six reading frames (translation covers both strands, so record
     /// orientation does not matter).
+    #[cfg(test)]
     pub fn has_match(&self, seq: &[u8]) -> bool {
+        self.has_match_with(seq, &mut MatchScratch::new())
+    }
+
+    /// Like the convenience matcher, but reuses `scratch`.
+    pub fn has_match_with(&self, seq: &[u8], scratch: &mut MatchScratch) -> bool {
         match self {
-            Pattern::Dna(p) => p.has_match(seq),
+            Pattern::Dna(p) => p.has_match_with(seq, scratch),
             Pattern::Peptide(p) => translate_frames(seq)
                 .iter()
-                .any(|frame| p.has_match(frame.as_bytes())),
+                .any(|frame| p.has_match_with(frame.as_bytes(), scratch)),
         }
     }
 
@@ -667,5 +728,44 @@ mod tests {
         assert_eq!(SearchScope::Sequence.next(), SearchScope::Id);
         assert_eq!(SearchScope::Id.next(), SearchScope::SequenceAndId);
         assert_eq!(SearchScope::SequenceAndId.next(), SearchScope::Sequence);
+    }
+
+    #[test]
+    fn test_match_scratch_reuse_dna() {
+        let p = Pattern::new("atgc", true).unwrap();
+        let mut scratch = MatchScratch::new();
+        assert!(p.has_match_with(b"TTATGCAA", &mut scratch));
+        assert!(p.has_match_with(b"TTGCATAA", &mut scratch)); // rc
+        assert!(!p.has_match_with(b"GGGGGGGG", &mut scratch));
+        // Reusing the scratch must not leak bytes from earlier, longer inputs.
+        assert!(p.has_match_with(b"TTatgcAA", &mut scratch));
+        // ID matching uses a separate buffer and never tries the revcomp.
+        assert!(p.has_match_id_with(b"id_ATGC", &mut scratch));
+        assert!(!p.has_match_id_with(b"id_GCAT", &mut scratch));
+    }
+
+    #[test]
+    fn test_match_scratch_reuse_peptide() {
+        let p = Pattern::new_peptide("CAR").unwrap();
+        let mut scratch = MatchScratch::new();
+        assert!(p.has_match_with(b"tgtgctcgt", &mut scratch));
+        assert!(!p.has_match_with(b"atgaaataa", &mut scratch));
+        assert!(p.has_match_id_with(b"sample_car_1", &mut scratch));
+    }
+
+    #[test]
+    fn test_search_scope_matches_with_scratch() {
+        let pattern = Pattern::new("acgt", false).unwrap();
+        let mut scratch = MatchScratch::new();
+        let seq_match = record("read1", "TTACGTTT");
+        let id_match = record("sample_acgt_1", "TTTTTTTT");
+        let no_match = record("none", "GGGGGGGG");
+
+        assert!(SearchScope::Sequence.matches_with(&pattern, &seq_match, &mut scratch));
+        assert!(!SearchScope::Sequence.matches_with(&pattern, &id_match, &mut scratch));
+        assert!(!SearchScope::Id.matches_with(&pattern, &seq_match, &mut scratch));
+        assert!(SearchScope::Id.matches_with(&pattern, &id_match, &mut scratch));
+        assert!(SearchScope::SequenceAndId.matches_with(&pattern, &id_match, &mut scratch));
+        assert!(!SearchScope::SequenceAndId.matches_with(&pattern, &no_match, &mut scratch));
     }
 }
