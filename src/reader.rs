@@ -14,12 +14,28 @@ pub trait RecordSource {
     fn next_record(&mut self) -> Result<Option<&Record>>;
 }
 
-/// Open `path` (or stdin for `-`) and choose a parser for its contents.
+/// Open `path` (or stdin for `-`) and choose a parser from its contents.
 ///
-/// Only FASTQ exists so far; FASTA, SAM, BAM and CRAM plug in here later.
+/// The format is detected from the first non-blank byte of the (decompressed)
+/// stream, so `.fa`/`.fastq` naming and gzip suffixes do not matter. SAM, BAM
+/// and CRAM are detected here as well once they are implemented.
 pub fn open_source(path: &str) -> Result<Box<dyn RecordSource>> {
-    let input = InputReader::new(path)?;
-    Ok(Box::new(FastqSource::new(input.into_fastq_reader())))
+    let mut input = InputReader::new(path)?;
+    let is_fasta = {
+        let prefix = input.peek(4096)?;
+        // A UTF-8 BOM is legal at the start of a text file.
+        let prefix = prefix.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(prefix);
+        prefix
+            .iter()
+            .find(|b| !b.is_ascii_whitespace())
+            .is_some_and(|&b| b == b'>')
+    };
+
+    if is_fasta {
+        Ok(Box::new(FastaSource::new(input.into_inner())))
+    } else {
+        Ok(Box::new(FastqSource::new(input.into_fastq_reader())))
+    }
 }
 
 /// Unified reader that handles both files and stdin, with automatic compression detection.
@@ -78,6 +94,20 @@ impl InputReader {
     pub fn into_fastq_reader(self) -> fastq::Reader<BufReader<Box<dyn BufRead>>> {
         fastq::Reader::new(self.inner)
     }
+
+    /// Take the decompressed stream out, for parsers that read lines directly.
+    pub fn into_inner(self) -> Box<dyn BufRead> {
+        self.inner
+    }
+
+    /// Look at the next `n` bytes without consuming them.
+    ///
+    /// Works on the decompressed stream, so gzipped input is sniffed by its
+    /// actual content. The returned slice may be shorter than `n` near EOF.
+    pub fn peek(&mut self, n: usize) -> Result<&[u8]> {
+        let buffer = self.inner.fill_buf()?;
+        Ok(&buffer[..buffer.len().min(n)])
+    }
 }
 
 /// FASTQ parser built on `bio`'s reader, decoding into [`Record`].
@@ -110,6 +140,120 @@ impl RecordSource for FastqSource {
             return Ok(None);
         }
         self.record.set_from_fastq(&self.scratch);
+        Ok(Some(&self.record))
+    }
+}
+
+/// FASTA parser: `>name [description]` followed by one or more sequence lines.
+///
+/// Sequences may be wrapped over any number of lines; they are concatenated
+/// and internal whitespace is dropped. Case is preserved so soft-masked
+/// (lowercase) sequence keeps working with the adapter detector.
+pub struct FastaSource {
+    inner: Box<dyn BufRead>,
+    /// Header of the record after the current one, found while reading ahead.
+    pending_header: Option<Vec<u8>>,
+    line: Vec<u8>,
+    record: Record,
+    done: bool,
+}
+
+impl FastaSource {
+    pub fn new(inner: Box<dyn BufRead>) -> Self {
+        Self {
+            inner,
+            pending_header: None,
+            line: Vec::new(),
+            record: Record::new(),
+            done: false,
+        }
+    }
+
+    /// Read one line into `self.line` and return its length without the line
+    /// ending and trailing whitespace, or `None` at EOF.
+    fn read_line_len(&mut self) -> Result<Option<usize>> {
+        self.line.clear();
+        if self.inner.read_until(b'\n', &mut self.line)? == 0 {
+            return Ok(None);
+        }
+        let end = self
+            .line
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(0, |pos| pos + 1);
+        Ok(Some(end))
+    }
+
+    /// Skip blank lines and return the next header line without its `>`.
+    fn read_header(&mut self) -> Result<Option<Vec<u8>>> {
+        while let Some(len) = self.read_line_len()? {
+            let line = &self.line[..len];
+            if line.is_empty() {
+                continue;
+            }
+            let line = line.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(line);
+            match line.strip_prefix(b">") {
+                Some(header) => return Ok(Some(header.to_vec())),
+                None => anyhow::bail!(
+                    "expected '>' at FASTA record start, found {:?}",
+                    String::from_utf8_lossy(&line[..line.len().min(40)])
+                ),
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Split a FASTA header into ID and description at the first whitespace.
+fn split_fasta_header(header: &[u8]) -> Result<(&str, Option<&str>)> {
+    let header = std::str::from_utf8(header).context("FASTA header is not valid UTF-8")?;
+    let header = header.trim();
+    let (id, desc) = match header.find(|c: char| c.is_ascii_whitespace()) {
+        Some(pos) => (&header[..pos], Some(header[pos..].trim())),
+        None => (header, None),
+    };
+    if id.is_empty() {
+        anyhow::bail!("FASTA header is missing an identifier");
+    }
+    Ok((id, desc.filter(|desc| !desc.is_empty())))
+}
+
+impl RecordSource for FastaSource {
+    fn next_record(&mut self) -> Result<Option<&Record>> {
+        if self.done {
+            return Ok(None);
+        }
+
+        let header = match self.pending_header.take() {
+            Some(header) => header,
+            None => match self.read_header()? {
+                Some(header) => header,
+                None => {
+                    self.done = true;
+                    return Ok(None);
+                }
+            },
+        };
+
+        let (id, desc) = split_fasta_header(&header)?;
+        self.record.set_name(id, desc);
+        self.record.seq_mut().clear();
+        self.record.set_qual(None);
+
+        while let Some(len) = self.read_line_len()? {
+            let line = &self.line[..len];
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix(b">") {
+                self.pending_header = Some(rest.to_vec());
+                break;
+            }
+            self.record
+                .seq_mut()
+                .extend(line.iter().copied().filter(|b| !b.is_ascii_whitespace()));
+        }
+
         Ok(Some(&self.record))
     }
 }
@@ -302,6 +446,138 @@ mod tests {
         assert_eq!(id1, "A");
         assert_eq!(id2, "B");
         assert_eq!(seq_ptr1, seq_ptr2, "record buffer should be reused");
+        assert!(source.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_open_source_fasta_plain() {
+        let content = ">seq1 first record\nACGT\nACGT\n\n>seq2\nTTTT\n";
+        let temp_file = create_temp_fastq(content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open FASTA");
+
+        let first = source
+            .next_record()
+            .expect("Failed to read first record")
+            .expect("Expected a first record");
+        assert_eq!(first.id(), "seq1");
+        assert_eq!(first.desc(), Some("first record"));
+        assert_eq!(first.seq(), b"ACGTACGT");
+        assert_eq!(first.qual(), None);
+        assert!(!first.has_quality());
+
+        let second = source
+            .next_record()
+            .expect("Failed to read second record")
+            .expect("Expected a second record");
+        assert_eq!(second.id(), "seq2");
+        assert_eq!(second.desc(), None);
+        assert_eq!(second.seq(), b"TTTT");
+
+        assert!(source.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_open_source_fasta_gzipped() {
+        let content = ">seq1\nACGT\n";
+        let temp_file = create_temp_gzipped_fastq(content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open gzipped FASTA");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.id(), "seq1");
+        assert_eq!(record.seq(), b"ACGT");
+        assert_eq!(record.qual(), None);
+    }
+
+    #[test]
+    fn test_open_source_fasta_without_trailing_newline() {
+        let temp_file = create_temp_fastq(">seq1\nACGT");
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open FASTA");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.id(), "seq1");
+        assert_eq!(record.seq(), b"ACGT");
+        assert!(source.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_open_source_fasta_crlf_and_blank_header_lines() {
+        let content = "\r\n>seq1 desc\r\nACGT\r\nACGT\r\n";
+        let temp_file = create_temp_fastq(content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open FASTA");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.id(), "seq1");
+        assert_eq!(record.desc(), Some("desc"));
+        assert_eq!(record.seq(), b"ACGTACGT");
+    }
+
+    #[test]
+    fn test_open_source_fasta_with_utf8_bom() {
+        let temp_file = create_temp_fastq("\u{feff}>seq1 desc\nACGT\n");
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open FASTA with BOM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.id(), "seq1");
+        assert_eq!(record.desc(), Some("desc"));
+        assert_eq!(record.seq(), b"ACGT");
+    }
+
+    #[test]
+    fn test_open_source_fasta_drops_internal_whitespace() {
+        let temp_file = create_temp_fastq(">seq1\nAC GT\nAC\tGT\n");
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open FASTA");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.seq(), b"ACGTACGT");
+    }
+
+    #[test]
+    fn test_fasta_source_rejects_sequence_before_header() {
+        let input: Box<dyn BufRead> = Box::new(BufReader::new(&b"ACGT\n>seq1\nACGT\n"[..]));
+        let mut source = FastaSource::new(input);
+        let error = source
+            .next_record()
+            .expect_err("Sequence before the first header should fail");
+
+        assert!(
+            format!("{error}").contains("expected '>'"),
+            "Unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_open_source_fasta_empty_file() {
+        let temp_file = create_temp_fastq("");
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open empty file");
         assert!(source.next_record().unwrap().is_none());
     }
 

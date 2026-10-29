@@ -56,13 +56,16 @@ impl Record {
         self.qual.as_deref()
     }
 
-    /// Replace the contents with `src`, reusing the existing buffers so a
-    /// whole-file scan does not allocate per read.
-    pub(crate) fn set_from_fastq(&mut self, src: &fastq::Record) {
-        self.id.clear();
-        self.id.push_str(src.id());
+    pub fn has_quality(&self) -> bool {
+        self.qual.is_some()
+    }
 
-        match (src.desc(), &mut self.desc) {
+    /// Set the name fields, reusing the existing buffers.
+    pub(crate) fn set_name(&mut self, id: &str, desc: Option<&str>) {
+        self.id.clear();
+        self.id.push_str(id);
+
+        match (desc, &mut self.desc) {
             (Some(desc), Some(existing)) => {
                 existing.clear();
                 existing.push_str(desc);
@@ -70,13 +73,34 @@ impl Record {
             (Some(desc), slot) => *slot = Some(desc.to_owned()),
             (None, slot) => *slot = None,
         }
+    }
+
+    /// Mutable access to the sequence, so parsers can append without copying.
+    pub(crate) fn seq_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.seq
+    }
+
+    /// Set or clear the qualities, reusing the existing buffer when possible.
+    pub(crate) fn set_qual(&mut self, qual: Option<&[u8]>) {
+        match (qual, &mut self.qual) {
+            (Some(qual), Some(existing)) => {
+                existing.clear();
+                existing.extend_from_slice(qual);
+            }
+            (Some(qual), slot) => *slot = Some(qual.to_vec()),
+            (None, slot) => *slot = None,
+        }
+    }
+
+    /// Replace the contents with `src`, reusing the existing buffers so a
+    /// whole-file scan does not allocate per read.
+    pub(crate) fn set_from_fastq(&mut self, src: &fastq::Record) {
+        self.set_name(src.id(), src.desc());
 
         self.seq.clear();
         self.seq.extend_from_slice(src.seq());
 
-        let qual = self.qual.get_or_insert_with(Vec::new);
-        qual.clear();
-        qual.extend_from_slice(src.qual());
+        self.set_qual(Some(src.qual()));
     }
 }
 

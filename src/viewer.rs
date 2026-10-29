@@ -77,6 +77,9 @@ pub struct FastqStats {
     /// independent of the number of reads.
     pub average_read_quality_histogram: Vec<u64>,
     pub adapter_stats: AdapterStats, // Adapter contamination statistics
+    /// False when the input has no base qualities (FASTA), so the quality
+    /// charts are hidden instead of showing misleading empty data.
+    pub quality_available: bool,
 }
 
 impl Default for FastqStats {
@@ -94,6 +97,7 @@ impl Default for FastqStats {
             scanned_all: false,
             average_read_quality_histogram: vec![0; AVG_QUAL_NUM_BINS],
             adapter_stats: AdapterStats::default(),
+            quality_available: false,
         }
     }
 }
@@ -184,6 +188,15 @@ fn calculate_stats_layout(area: Rect) -> (Rect, Vec<Vec<Rect>>) {
         })
         .collect();
     (title_area, main_areas)
+}
+
+/// Placeholder for a quality panel when the input has no base qualities
+/// (FASTA), so the chart is not mistaken for an all-zero distribution.
+fn no_quality_message(title: &'static str) -> Paragraph<'static> {
+    Paragraph::new(Line::from("No quality data in input (FASTA)"))
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
 }
 
 /// Create quality histogram bar chart
@@ -432,8 +445,12 @@ impl TuiViewer {
             seq_len_r2.max(1).div_ceil(terminal_width.saturating_sub(2))
         };
 
-        let quality_lines = if self.show_quality {
-            seq_lines_r1 + seq_lines_r2
+        let quality_lines = if self.show_quality && r1.has_quality() {
+            seq_lines_r1
+        } else {
+            0
+        } + if self.show_quality && r2.has_quality() {
+            seq_lines_r2
         } else {
             0
         };
@@ -1211,6 +1228,7 @@ impl TuiViewer {
         let mut total_gc = 0u64;
         let mut total_n = 0u64;
         let mut average_read_quality_histogram = vec![0u64; AVG_QUAL_NUM_BINS];
+        let mut saw_quality = false;
 
         // Initialize adapter detector
         let adapter_detector = AdapterDetector::new();
@@ -1231,7 +1249,7 @@ impl TuiViewer {
                 max_length = max_length.max(seq_len);
 
                 let seq = record.seq();
-                let qual = record.qual().unwrap_or_default();
+                let qual = record.qual();
 
                 // Combined pass through sequence for GC/N content and adapter detection
                 // This is more cache-friendly than separate passes
@@ -1254,37 +1272,44 @@ impl TuiViewer {
                 let adapter_detections = adapter_detector.detect_adapters(seq);
                 adapter_detector.update_stats(&mut local_adapter_stats, &adapter_detections);
 
-                // Process quality scores with optimized loop
-                let base_phred = phred_range.base_phred();
-                let mut total_qual = 0u32;
+                // Quality processing is skipped for inputs without qualities
+                // (FASTA); the quality charts are hidden instead of showing
+                // empty data as if every base had Q0.
+                if let Some(qual) = qual {
+                    saw_quality = true;
 
-                // Ensure position vectors are large enough upfront
-                if seq_len > position_quality_sums.len() {
-                    position_quality_sums.resize(seq_len, 0.0);
-                    position_counts.resize(seq_len, 0);
-                }
+                    // Process quality scores with optimized loop
+                    let base_phred = phred_range.base_phred();
+                    let mut total_qual = 0u32;
 
-                for (pos, &qual_val) in qual.iter().enumerate() {
-                    let quality_score = qual_val.saturating_sub(base_phred);
-                    total_qual += quality_score as u32;
-
-                    // Update histogram
-                    if (quality_score as usize) < quality_histogram.len() {
-                        quality_histogram[quality_score as usize] += 1;
+                    // Ensure position vectors are large enough upfront
+                    if seq_len > position_quality_sums.len() {
+                        position_quality_sums.resize(seq_len, 0.0);
+                        position_counts.resize(seq_len, 0);
                     }
 
-                    // Update position-wise quality (no bounds checking needed now)
-                    position_quality_sums[pos] += quality_score as f64;
-                    position_counts[pos] += 1;
+                    for (pos, &qual_val) in qual.iter().enumerate() {
+                        let quality_score = qual_val.saturating_sub(base_phred);
+                        total_qual += quality_score as u32;
+
+                        // Update histogram
+                        if (quality_score as usize) < quality_histogram.len() {
+                            quality_histogram[quality_score as usize] += 1;
+                        }
+
+                        // Update position-wise quality (no bounds checking needed now)
+                        position_quality_sums[pos] += quality_score as f64;
+                        position_counts[pos] += 1;
+                    }
+
+                    let average_quality = if seq_len > 0 {
+                        total_qual as f64 / seq_len as f64
+                    } else {
+                        0.0
+                    };
+
+                    average_read_quality_histogram[average_quality_bin(average_quality)] += 1;
                 }
-
-                let average_quality = if seq_len > 0 {
-                    total_qual as f64 / seq_len as f64
-                } else {
-                    0.0
-                };
-
-                average_read_quality_histogram[average_quality_bin(average_quality)] += 1;
 
                 // Update stats every so often and check stop flag
                 if total_reads.is_multiple_of(100000) {
@@ -1310,6 +1335,7 @@ impl TuiViewer {
                         stats_lock.average_read_quality_histogram =
                             average_read_quality_histogram.clone();
                         stats_lock.adapter_stats = local_adapter_stats.clone();
+                        stats_lock.quality_available = saw_quality;
 
                         // Calculate position quality
                         stats_lock.position_quality = position_quality_sums
@@ -1389,6 +1415,7 @@ impl TuiViewer {
                     .collect();
                 stats_lock.average_read_quality_histogram = average_read_quality_histogram;
                 stats_lock.adapter_stats = local_adapter_stats;
+                stats_lock.quality_available = saw_quality;
                 stats_lock.scanned_all = true;
             }
         }
@@ -1488,19 +1515,21 @@ impl TuiViewer {
     /// Render an amino acid as either its quality color (stops in red) or the
     /// search-match highlight (yellow background) when inside a match range.
     /// Quality scores here are absolute (0-40), so no phred offset is applied.
-    fn aa_span<'a>(&self, ch: u8, quality: u8, highlighted: bool) -> Span<'a> {
+    fn aa_span<'a>(&self, ch: u8, quality: Option<u8>, highlighted: bool) -> Span<'a> {
         if highlighted {
             Span::styled(
                 char::from(ch).to_string(),
                 Style::default().fg(Color::Black).bg(Color::Yellow),
             )
+        } else if ch == b'*' {
+            Span::styled(char::from(ch).to_string(), Style::default().fg(Color::Red))
         } else {
-            let color = if ch == b'*' {
-                Color::Red
-            } else {
-                self.color_scheme.quality_to_color(quality)
+            let style = match quality {
+                Some(quality) => Style::default().fg(self.color_scheme.quality_to_color(quality)),
+                // Without base qualities (FASTA) the frame is not shaded.
+                None => Style::default(),
             };
-            Span::styled(char::from(ch).to_string(), Style::default().fg(color))
+            Span::styled(char::from(ch).to_string(), style)
         }
     }
 
@@ -1550,9 +1579,25 @@ impl TuiViewer {
         spans
     }
 
+    /// Six-frame translation of `seq`, with per-amino-acid quality scores when
+    /// the record has qualities and zeros otherwise (rendered unshaded).
+    fn translation_frames(&self, seq: &[u8], qual: Option<&[u8]>) -> Vec<(String, Vec<u8>)> {
+        match qual {
+            Some(qual) => translate_frames_with_quality(seq, qual, self.phred_range.base_phred()),
+            None => translate_frames(seq)
+                .into_iter()
+                .map(|frame| {
+                    let len = frame.len();
+                    (frame, vec![0u8; len])
+                })
+                .collect(),
+        }
+    }
+
     /// Return the sequence and quality of a record in the currently selected
     /// orientation. Quality stays paired with its base, so it is reversed
-    /// together with the sequence for the reverse complement.
+    /// together with the sequence for the reverse complement. Records without
+    /// qualities (FASTA) yield an empty quality vector.
     fn oriented_seq_qual(&self, record: &Record) -> (Vec<u8>, Vec<u8>) {
         match self.orientation {
             ReadOrientation::AsIs => (
@@ -1593,9 +1638,12 @@ impl TuiViewer {
 
         let rx = spawn_input_thread(key_source);
 
-        // use the buffered reads to determine the phred range
-        let (phred_min, phred_max) = determine_min_max_phred(&self.buffer.reads.read().unwrap());
-        self.phred_range = PhredRange::from_min_max(phred_min, phred_max);
+        // use the buffered reads to determine the phred range (FASTA has none)
+        if let Some((phred_min, phred_max)) =
+            determine_min_max_phred(&self.buffer.reads.read().unwrap())
+        {
+            self.phred_range = PhredRange::from_min_max(phred_min, phred_max);
+        }
 
         self.terminal.clear()?;
         let mut last_stats_update = 0;
@@ -1880,12 +1928,14 @@ impl TuiViewer {
 
                 let (seq1, qual1) = self.oriented_seq_qual(r1);
                 let (seq2, qual2) = self.oriented_seq_qual(r2);
+                let has_qual1 = r1.has_quality();
+                let has_qual2 = r2.has_quality();
 
                 if self.show_translation {
                     let frames1 =
-                        translate_frames_with_quality(&seq1, &qual1, self.phred_range.base_phred());
+                        self.translation_frames(&seq1, has_qual1.then_some(qual1.as_slice()));
                     let frames2 =
-                        translate_frames_with_quality(&seq2, &qual2, self.phred_range.base_phred());
+                        self.translation_frames(&seq2, has_qual2.then_some(qual2.as_slice()));
                     let highlight = self.highlight_pattern();
                     let labels: Vec<String> = (0..6)
                         .map(|i| {
@@ -1922,15 +1972,23 @@ impl TuiViewer {
                                 continue;
                             }
                             for (k, &ch) in visible[pos..s - vs].iter().enumerate() {
-                                spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                                spans.push(self.aa_span(
+                                    ch,
+                                    has_qual1.then_some(v_scores[pos + k]),
+                                    false,
+                                ));
                             }
                             for &ch in &visible[s - vs..e - vs] {
-                                spans.push(self.aa_span(ch, 0, true));
+                                spans.push(self.aa_span(ch, None, true));
                             }
                             pos = e - vs;
                         }
                         for (k, &ch) in visible[pos..].iter().enumerate() {
-                            spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                            spans.push(self.aa_span(
+                                ch,
+                                has_qual1.then_some(v_scores[pos + k]),
+                                false,
+                            ));
                         }
                         prepared_lines.push(Line::from(spans));
                     }
@@ -1958,15 +2016,23 @@ impl TuiViewer {
                                 continue;
                             }
                             for (k, &ch) in visible[pos..s - vs].iter().enumerate() {
-                                spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                                spans.push(self.aa_span(
+                                    ch,
+                                    has_qual2.then_some(v_scores[pos + k]),
+                                    false,
+                                ));
                             }
                             for &ch in &visible[s - vs..e - vs] {
-                                spans.push(self.aa_span(ch, 0, true));
+                                spans.push(self.aa_span(ch, None, true));
                             }
                             pos = e - vs;
                         }
                         for (k, &ch) in visible[pos..].iter().enumerate() {
-                            spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                            spans.push(self.aa_span(
+                                ch,
+                                has_qual2.then_some(v_scores[pos + k]),
+                                false,
+                            ));
                         }
                         prepared_lines.push(Line::from(spans));
                     }
@@ -1983,13 +2049,13 @@ impl TuiViewer {
                 };
                 let prefix_r1 = Span::styled("1:\u{00a0}", Style::default());
                 let mut r1s = vec![prefix_r1];
-                r1s.extend(if !self.show_quality {
+                r1s.extend(if !self.show_quality && has_qual1 {
                     self.colorize_sequence(vs1, vq1)
                 } else {
                     self.raw_sequence_with_highlight(vs1)
                 });
                 prepared_lines.push(Line::from(r1s));
-                if self.show_quality {
+                if self.show_quality && has_qual1 {
                     let mut r1q = vec![Span::styled("1:\u{00a0}", Style::default())];
                     r1q.extend(self.colorize_sequence(vq1, vq1));
                     prepared_lines.push(Line::from(r1q));
@@ -2004,13 +2070,13 @@ impl TuiViewer {
                     (&seq2[..], &qual2[..])
                 };
                 let mut r2s = vec![Span::styled("2:\u{00a0}", Style::default())];
-                r2s.extend(if !self.show_quality {
+                r2s.extend(if !self.show_quality && has_qual2 {
                     self.colorize_sequence(vs2, vq2)
                 } else {
                     self.raw_sequence_with_highlight(vs2)
                 });
                 prepared_lines.push(Line::from(r2s));
-                if self.show_quality {
+                if self.show_quality && has_qual2 {
                     let mut r2q = vec![Span::styled("2:\u{00a0}", Style::default())];
                     r2q.extend(self.colorize_sequence(vq2, vq2));
                     prepared_lines.push(Line::from(r2q));
@@ -2024,12 +2090,12 @@ impl TuiViewer {
             for record in records.iter() {
                 prepared_lines.push(self.header_line(record.id(), record.desc()));
                 let (oriented_seq, oriented_qual) = self.oriented_seq_qual(record);
+                let has_qual = record.has_quality();
 
                 if self.show_translation {
-                    let frames = translate_frames_with_quality(
+                    let frames = self.translation_frames(
                         &oriented_seq,
-                        &oriented_qual,
-                        self.phred_range.base_phred(),
+                        has_qual.then_some(oriented_qual.as_slice()),
                     );
                     let highlight = self.highlight_pattern();
                     let labels: Vec<String> = frames
@@ -2068,15 +2134,23 @@ impl TuiViewer {
                                 continue;
                             }
                             for (k, &ch) in visible[pos..s - vs].iter().enumerate() {
-                                spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                                spans.push(self.aa_span(
+                                    ch,
+                                    has_qual.then_some(v_scores[pos + k]),
+                                    false,
+                                ));
                             }
                             for &ch in &visible[s - vs..e - vs] {
-                                spans.push(self.aa_span(ch, 0, true));
+                                spans.push(self.aa_span(ch, None, true));
                             }
                             pos = e - vs;
                         }
                         for (k, &ch) in visible[pos..].iter().enumerate() {
-                            spans.push(self.aa_span(ch, v_scores[pos + k], false));
+                            spans.push(self.aa_span(
+                                ch,
+                                has_qual.then_some(v_scores[pos + k]),
+                                false,
+                            ));
                         }
                         prepared_lines.push(Line::from(spans));
                     }
@@ -2093,13 +2167,13 @@ impl TuiViewer {
                 } else {
                     (&oriented_seq[..], &oriented_qual[..])
                 };
-                let ss = if !self.show_quality {
+                let ss = if !self.show_quality && has_qual {
                     self.colorize_sequence(vs, vq)
                 } else {
                     self.raw_sequence_with_highlight(vs)
                 };
                 prepared_lines.push(Line::from(ss));
-                if self.show_quality {
+                if self.show_quality && has_qual {
                     prepared_lines.push(Line::from(self.colorize_sequence(vq, vq)));
                 }
             }
@@ -2227,13 +2301,13 @@ impl TuiViewer {
                         Span::raw("  "),
                         r2_tab,
                         Span::raw(format!(
-                            "  FASTQ Statistics ({}) {}",
+                            "  Sequencing Statistics ({}) {}",
                             label, status_indicator
                         )),
                     ])
                 } else {
                     Line::from(Span::styled(
-                        format!("FASTQ Statistics {}", status_indicator),
+                        format!("Sequencing Statistics {}", status_indicator),
                         Style::default(),
                     ))
                 };
@@ -2273,7 +2347,12 @@ impl TuiViewer {
 
                 // Quality histogram block (left side)
                 if let Some(histogram_area) = main_areas.get(1).and_then(|areas| areas.first()) {
-                    if !stats_lock.quality_histogram.is_empty() {
+                    if !stats_lock.quality_available && stats_lock.processed_reads > 0 {
+                        f.render_widget(
+                            no_quality_message("Quality Score Distribution"),
+                            *histogram_area,
+                        );
+                    } else if !stats_lock.quality_histogram.is_empty() {
                         let quality_chart =
                             create_quality_histogram(&stats_lock, &self.color_scheme);
                         f.render_widget(quality_chart, *histogram_area);
@@ -2293,7 +2372,12 @@ impl TuiViewer {
                 if let Some(average_histogram_area) =
                     main_areas.get(1).and_then(|areas| areas.get(1))
                 {
-                    if stats_lock.processed_reads > 0 {
+                    if !stats_lock.quality_available && stats_lock.processed_reads > 0 {
+                        f.render_widget(
+                            no_quality_message("Average Read Quality Distribution"),
+                            *average_histogram_area,
+                        );
+                    } else if stats_lock.processed_reads > 0 {
                         let average_quality_chart =
                             create_average_read_quality_histogram(&stats_lock, &self.color_scheme);
                         f.render_widget(average_quality_chart, *average_histogram_area);
@@ -2318,7 +2402,12 @@ impl TuiViewer {
 
                 // Position quality block
                 if let Some(position_area) = main_areas.get(2).and_then(|areas| areas.first()) {
-                    if !stats_lock.position_quality.is_empty() {
+                    if !stats_lock.quality_available && stats_lock.processed_reads > 0 {
+                        f.render_widget(
+                            no_quality_message("Average Quality by Position"),
+                            *position_area,
+                        );
+                    } else if !stats_lock.position_quality.is_empty() {
                         let position_chart =
                             create_position_quality_chart(&stats_lock, &self.color_scheme);
                         f.render_widget(position_chart, *position_area);

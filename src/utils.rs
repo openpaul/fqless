@@ -246,18 +246,26 @@ pub fn translate_frames(seq: &[u8]) -> Vec<String> {
         .collect()
 }
 
-pub fn determine_min_max_phred(records: &[Record]) -> (u8, u8) {
+pub fn determine_min_max_phred(records: &[Record]) -> Option<(u8, u8)> {
     let mut min_phred = u8::MAX;
     let mut max_phred = u8::MIN;
+    let mut saw_quality = false;
 
     for record in records {
-        for &q in record.qual().unwrap_or_default() {
+        let Some(qual) = record.qual() else {
+            continue;
+        };
+        if qual.is_empty() {
+            continue;
+        }
+        saw_quality = true;
+        for &q in qual {
             min_phred = min_phred.min(q);
             max_phred = max_phred.max(q);
         }
     }
 
-    (min_phred, max_phred)
+    saw_quality.then_some((min_phred, max_phred))
 }
 
 /// Calculate how many lines a sequencing record takes on screen
@@ -268,6 +276,8 @@ pub fn calculate_record_lines(
     show_quality: bool,
     translate: bool,
 ) -> usize {
+    // A record without qualities (FASTA) never renders a quality line.
+    let show_quality = show_quality && record.has_quality();
     let header_lines = 1; // Header line (ID + description)
 
     if translate {
@@ -341,10 +351,14 @@ mod tests {
         let record = Record::with_attrs("test", None, b"ACGT", Some(b"!IJK")); // ASCII 33, 73, 74, 75
 
         let records = vec![record];
-        let (min, max) = determine_min_max_phred(&records);
+        assert_eq!(determine_min_max_phred(&records), Some((33, 75)));
+    }
 
-        assert_eq!(min, 33);
-        assert_eq!(max, 75);
+    #[test]
+    fn test_determine_min_max_phred_without_quality() {
+        let record = Record::with_attrs("test", None, b"ACGT", None);
+
+        assert_eq!(determine_min_max_phred(&[record]), None);
     }
 
     #[test]
@@ -363,6 +377,15 @@ mod tests {
         // Test with quality shown and wrapping - doubles sequence lines
         let lines = calculate_record_lines(&record, 80, false, true, false);
         assert_eq!(lines, 5); // 1 header + 2 sequence + 2 quality
+    }
+
+    #[test]
+    fn test_calculate_record_lines_without_quality() {
+        // FASTA has no qualities, so no quality line is counted even when the
+        // quality display is toggled on.
+        let record = Record::with_attrs("test", None, b"ACGTACGT", None);
+
+        assert_eq!(calculate_record_lines(&record, 80, false, true, false), 2);
     }
 
     #[test]
