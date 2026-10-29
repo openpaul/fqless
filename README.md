@@ -2,7 +2,7 @@
 
 ![Coverage](coverage-badge.svg) ![Coverage (no TUI)](coverage-no-tui-badge.svg)
 
-fqless is a small less-like viewer for FastQ and FASTA sequencing files. It allows the user to get a quick glance at their sequencing data without the need for a heavy GUI.
+fqless is a small less-like viewer for FastQ, FASTA and SAM sequencing files. It allows the user to get a quick glance at their sequencing data without the need for a heavy GUI.
 
 It displays the name and the color-coded sequence. It hides the quality line from the user, as this is machine information for machines and not for human beings.
 
@@ -20,11 +20,17 @@ fqless file.fasta
 fqless file.fasta.gz
 ```
 
-The format is detected from the file contents, so FASTQ and FASTA (plain or
-gzipped, or piped) work without any extra flags. FASTA has no base qualities, so
-the quality toggle and the quality panels of the stats page are unavailable for
-FASTA input; everything else (search, translation, GC/N/length and adapter
-statistics) works the same.
+The format is detected from the file contents, so FASTQ, FASTA and SAM (plain or
+gzipped, or piped) work without any extra flags.
+
+FASTA has no base qualities, so the quality toggle and the quality panels of the
+stats page are unavailable for FASTA input; everything else (search, translation,
+GC/N/length and adapter statistics) works the same.
+
+SAM files are shown as reads, not alignments: the alignment columns are ignored,
+secondary and supplementary alignments are skipped because they repeat a read
+that is already displayed, and reads on the reverse strand are flipped back to
+their original orientation.
 
 For paired-end sequencing data, pass both files:
 

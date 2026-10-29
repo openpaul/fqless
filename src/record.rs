@@ -80,6 +80,11 @@ impl Record {
         &mut self.seq
     }
 
+    /// Mutable access to the qualities, if the record has any.
+    pub(crate) fn qual_mut(&mut self) -> Option<&mut Vec<u8>> {
+        self.qual.as_mut()
+    }
+
     /// Set or clear the qualities, reusing the existing buffer when possible.
     pub(crate) fn set_qual(&mut self, qual: Option<&[u8]>) {
         match (qual, &mut self.qual) {

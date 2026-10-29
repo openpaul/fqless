@@ -1,5 +1,6 @@
 use crate::record::Record;
 use anyhow::{Context, Result};
+use bio::alphabets::dna;
 use bio::io::fastq::{self, FastqRead};
 use flate2::bufread::MultiGzDecoder;
 use std::fs::File;
@@ -32,10 +33,48 @@ pub fn open_source(path: &str) -> Result<Box<dyn RecordSource>> {
     };
 
     if is_fasta {
-        Ok(Box::new(FastaSource::new(input.into_inner())))
+        return Ok(Box::new(FastaSource::new(input.into_inner())));
+    }
+
+    let is_sam = {
+        let prefix = input.peek(4096)?;
+        let prefix = prefix.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(prefix);
+        looks_like_sam(prefix)
+    };
+
+    if is_sam {
+        Ok(Box::new(SamSource::new(input.into_inner())))
     } else {
         Ok(Box::new(FastqSource::new(input.into_fastq_reader())))
     }
+}
+
+/// True when the first line looks like a SAM header or alignment record.
+///
+/// SAM headers start with `@HD`, `@SQ`, `@RG`, `@PG` or `@CO` followed by a
+/// tab, and alignment records have at least 11 tab-separated fields. A FASTQ
+/// header may also start with `@`, so the tag/field check decides.
+fn looks_like_sam(prefix: &[u8]) -> bool {
+    let line = match prefix.split(|&b| b == b'\n').next() {
+        Some(line) => trim_ascii_end(line),
+        None => return false,
+    };
+
+    const HEADER_TAGS: [&[u8]; 5] = [b"@HD", b"@SQ", b"@RG", b"@PG", b"@CO"];
+    let is_header = HEADER_TAGS
+        .iter()
+        .any(|tag| line.starts_with(tag) && (line.len() == tag.len() || line[tag.len()] == b'\t'));
+
+    is_header || line.iter().filter(|&&b| b == b'\t').count() >= 10
+}
+
+/// Trim trailing ASCII whitespace (`\n`, `\r`, spaces).
+fn trim_ascii_end(line: &[u8]) -> &[u8] {
+    let end = line
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(0, |pos| pos + 1);
+    &line[..end]
 }
 
 /// Unified reader that handles both files and stdin, with automatic compression detection.
@@ -255,6 +294,124 @@ impl RecordSource for FastaSource {
         }
 
         Ok(Some(&self.record))
+    }
+}
+
+/// SAM flag: the sequence is stored as the reverse complement of the read.
+const SAM_FLAG_REVERSE: u16 = 0x10;
+/// SAM flag: secondary alignment (alternative position of the same read).
+const SAM_FLAG_SECONDARY: u16 = 0x100;
+/// SAM flag: supplementary alignment (chimeric segment of the same read).
+const SAM_FLAG_SUPPLEMENTARY: u16 = 0x800;
+
+/// SAM parser: tab-separated alignment records after an optional header.
+///
+/// Only sequence-level fields are used (QNAME, FLAG, SEQ, QUAL). Secondary and
+/// supplementary alignments are skipped because they repeat a read that is
+/// already shown, and reads mapped to the reverse strand are reverse
+/// complemented back to their original orientation.
+pub struct SamSource {
+    inner: Box<dyn BufRead>,
+    line: Vec<u8>,
+    record: Record,
+    line_no: u64,
+    done: bool,
+}
+
+impl SamSource {
+    pub fn new(inner: Box<dyn BufRead>) -> Self {
+        Self {
+            inner,
+            line: Vec::new(),
+            record: Record::new(),
+            line_no: 0,
+            done: false,
+        }
+    }
+
+    fn malformed(&self, what: &str) -> anyhow::Error {
+        anyhow::anyhow!("SAM line {}: {}", self.line_no, what)
+    }
+}
+
+impl RecordSource for SamSource {
+    fn next_record(&mut self) -> Result<Option<&Record>> {
+        if self.done {
+            return Ok(None);
+        }
+
+        loop {
+            self.line.clear();
+            if self.inner.read_until(b'\n', &mut self.line)? == 0 {
+                self.done = true;
+                return Ok(None);
+            }
+            self.line_no += 1;
+
+            let line = trim_ascii_end(&self.line);
+            if line.is_empty() {
+                continue;
+            }
+            // Headers and comments only occur before the alignments, but
+            // skipping them anywhere is harmless.
+            if line[0] == b'@' {
+                continue;
+            }
+
+            let mut fields = line.split(|&b| b == b'\t');
+            let qname = fields
+                .next()
+                .filter(|qname| !qname.is_empty())
+                .ok_or_else(|| self.malformed("missing read name"))?;
+            let flag = fields
+                .next()
+                .ok_or_else(|| self.malformed("missing FLAG field"))?;
+            let flag: u16 = std::str::from_utf8(flag)
+                .ok()
+                .and_then(|flag| flag.parse().ok())
+                .ok_or_else(|| self.malformed("FLAG is not a number"))?;
+
+            // RNAME, POS, MAPQ, CIGAR, RNEXT, PNEXT, TLEN are not displayed.
+            for _ in 0..7 {
+                fields
+                    .next()
+                    .ok_or_else(|| self.malformed("expected at least 11 fields"))?;
+            }
+
+            let seq = fields
+                .next()
+                .ok_or_else(|| self.malformed("missing SEQ field"))?;
+            let qual = fields
+                .next()
+                .ok_or_else(|| self.malformed("missing QUAL field"))?;
+
+            if flag & (SAM_FLAG_SECONDARY | SAM_FLAG_SUPPLEMENTARY) != 0 {
+                continue;
+            }
+            if seq == b"*" {
+                // An alignment without a sequence carries no read.
+                continue;
+            }
+
+            let id = std::str::from_utf8(qname)
+                .map_err(|_| self.malformed("read name is not valid UTF-8"))?;
+            self.record.set_name(id, None);
+            self.record.seq_mut().clear();
+            self.record.seq_mut().extend_from_slice(seq);
+            self.record.set_qual((qual != b"*").then_some(qual));
+
+            if flag & SAM_FLAG_REVERSE != 0 {
+                let revcomp = dna::revcomp(self.record.seq());
+                let seq = self.record.seq_mut();
+                seq.clear();
+                seq.extend_from_slice(&revcomp);
+                if let Some(qual) = self.record.qual_mut() {
+                    qual.reverse();
+                }
+            }
+
+            return Ok(Some(&self.record));
+        }
     }
 }
 
@@ -579,6 +736,141 @@ mod tests {
 
         let mut source = open_source(path).expect("Failed to open empty file");
         assert!(source.next_record().unwrap().is_none());
+    }
+
+    const SAM_HEADER: &str = "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n";
+
+    #[test]
+    fn test_open_source_sam_with_header() {
+        let content = format!(
+            "{SAM_HEADER}read1\t0\tchr1\t7\t60\t4M\t*\t0\t0\tACGT\tIIII\nread2\t0\tchr1\t8\t60\t3M\t*\t0\t0\tGGG\t###\n"
+        );
+        let temp_file = create_temp_fastq(&content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open SAM");
+
+        let first = source
+            .next_record()
+            .expect("Failed to read first record")
+            .expect("Expected a first record");
+        assert_eq!(first.id(), "read1");
+        assert_eq!(first.seq(), b"ACGT");
+        assert_eq!(first.qual(), Some(b"IIII".as_slice()));
+
+        let second = source
+            .next_record()
+            .expect("Failed to read second record")
+            .expect("Expected a second record");
+        assert_eq!(second.id(), "read2");
+        assert_eq!(second.seq(), b"GGG");
+
+        assert!(source.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_open_source_sam_without_header() {
+        let content = "read1\t0\tchr1\t7\t60\t4M\t*\t0\t0\tACGT\tIIII\n";
+        let temp_file = create_temp_fastq(content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open headerless SAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.id(), "read1");
+        assert_eq!(record.seq(), b"ACGT");
+    }
+
+    #[test]
+    fn test_open_source_fastq_starting_with_hd_is_not_sam() {
+        let temp_file = create_temp_fastq("@HDREAD\nACGT\n+\nIIII\n");
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open FASTQ");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.id(), "HDREAD");
+        assert_eq!(record.qual(), Some(b"IIII".as_slice()));
+    }
+
+    #[test]
+    fn test_sam_skips_secondary_and_supplementary() {
+        let content = format!(
+            "{SAM_HEADER}primary\t0\tchr1\t7\t60\t4M\t*\t0\t0\tACGT\tIIII\nsecondary\t256\tchr1\t7\t60\t4M\t*\t0\t0\tACGT\tIIII\nsupplementary\t2048\tchr1\t9\t60\t2M\t*\t0\t0\tAC\tII\n"
+        );
+        let temp_file = create_temp_fastq(&content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open SAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected the primary record");
+
+        assert_eq!(record.id(), "primary");
+        assert!(source.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_sam_reverse_strand_restores_original_orientation() {
+        // SAM stores reverse-strand reads reverse complemented, so the viewer
+        // should show the original read again after flipping it back.
+        let original = b"ACGTACGTTT";
+        let stored = dna::revcomp(original);
+        let stored = std::str::from_utf8(&stored).unwrap();
+        let content =
+            format!("{SAM_HEADER}rev\t16\tchr1\t7\t60\t10M\t*\t0\t0\t{stored}\tABCDEFGHIJ\n");
+        let temp_file = create_temp_fastq(&content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open SAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.seq(), original);
+        assert_eq!(record.qual(), Some(b"JIHGFEDCBA".as_slice()));
+    }
+
+    #[test]
+    fn test_sam_missing_quality_is_none() {
+        let content = format!("{SAM_HEADER}noqual\t0\tchr1\t7\t60\t4M\t*\t0\t0\tACGT\t*\n");
+        let temp_file = create_temp_fastq(&content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open SAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.seq(), b"ACGT");
+        assert_eq!(record.qual(), None);
+        assert!(!record.has_quality());
+    }
+
+    #[test]
+    fn test_sam_rejects_line_with_too_few_fields() {
+        let content = format!("{SAM_HEADER}read1\t0\tchr1\t7\n");
+        let temp_file = create_temp_fastq(&content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open SAM");
+        let error = source
+            .next_record()
+            .expect_err("A truncated SAM line should fail");
+
+        assert!(
+            format!("{error}").contains("SAM line 3"),
+            "Unexpected error: {error}"
+        );
     }
 
     #[test]

@@ -12,19 +12,20 @@ use std::env;
 
 fn print_usage() {
     println!(
-        "fqless v{} - FastQ/FASTA File Viewer\n",
+        "fqless v{} - FastQ/FASTA/SAM File Viewer\n",
         env!("CARGO_PKG_VERSION")
     );
-    println!("Usage: fqless <FASTQ|FASTA file> [<R2 file>]\n");
+    println!("Usage: fqless <FASTQ|FASTA|SAM file> [<R2 file>]\n");
     println!("Options:");
     println!("  -h, --help     Show this help message");
-    println!("\nThe format (FASTQ/FASTA, plain or gzipped) is detected automatically.");
+    println!("\nThe format (FASTQ/FASTA/SAM, plain or gzipped) is detected automatically.");
     println!("If the input is '-', reads from stdin.");
     println!();
     println!("Examples:");
     println!("  fqless myfile.fastq.gz                      # View a gzipped FASTQ file");
     println!("  fqless myfile.fastq                         # View a regular FASTQ file");
     println!("  fqless myfile.fasta                         # View a FASTA file (no quality)");
+    println!("  fqless myfile.sam                           # View reads from a SAM file");
     println!("  fqless R1.fastq.gz R2.fastq.gz              # View paired-end FASTQ files");
     println!("  cat myfile.fastq.gz | fqless -              # View gzipped FASTQ from stdin");
     println!("  cat myfile.fastq | fqless -                 # View regular FASTQ from stdin");
