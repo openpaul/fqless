@@ -76,14 +76,19 @@ fqless calculates some statistics in the background:
 
 ### Adapter Contamination
 - **Contaminated reads**: Number and percentage of reads containing adapter sequences
-- **Total adapter instances**: Total adapter sequences found (a single read may contain multiple adapters)
-- **Top adapters detected**: Lists the most common adapter sequences found with their frequency and average position
+- **Total adapter hits**: Number of adapter types detected (a read counts once per adapter type, even if that adapter occurs more than once)
+- **Top adapters detected**: Lists the most common adapter types found with the number of reads and average position
+
+Detection uses short (12-15 bp) seeds and searches both read orientations. This catches
+adapters that are only partially present at the end of a read, and is case-insensitive so
+soft-masked (lowercase) sequences are handled too. A read is only counted once per adapter
+type, which avoids double-counting adapters that share a common prefix.
 
 Supported adapter types:
-- Illumina (TruSeq Universal, TruSeq Index, Nextera)
+- Illumina (TruSeq, Nextera, Small RNA)
 - Oxford Nanopore (Rapid and Ligation adapters)
 - PacBio (SMRTbell and Iso-Seq)
-- PolyA tails
+- PolyA/PolyT tails
 
 ## What it does not
 - Write to disk: Nothing is written to disk

@@ -341,7 +341,7 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph<'_> {
             contamination_rate
         )),
         Line::from(format!(
-            "Total adapter instances: {} (avg {:.1} per contaminated read)",
+            "Total adapter hits: {} (avg {:.1} types per contaminated read)",
             adapter_stats
                 .total_adapters_found
                 .to_formatted_string(&Locale::en),
@@ -361,7 +361,7 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph<'_> {
     } else {
         for (i, (_, adapter_match)) in adapter_pairs.iter().take(3).enumerate() {
             content.push(Line::from(format!(
-                "  {}: {} ({}x, pos: {:.1})",
+                "  {}. {}: {} reads (avg pos: {:.1})",
                 i + 1,
                 adapter_match.name,
                 adapter_match.count.to_formatted_string(&Locale::en),

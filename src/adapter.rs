@@ -1,10 +1,12 @@
-use bio::pattern_matching::bndm::BNDM;
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+/// Maximum number of adapter families we can track per read in a `u64` bitmask.
+const MAX_ADAPTER_FAMILIES: usize = 64;
+
+#[derive(Debug, Clone, Default)]
 pub struct AdapterStats {
     pub total_adapters_found: u64,
-    pub adapter_positions: Vec<u64>, // Histogram of positions where adapters are found (0-150 positions)
     pub contaminated_reads: u64,
     pub adapters_detected: HashMap<String, AdapterMatch>,
 }
@@ -18,26 +20,11 @@ pub struct AdapterMatch {
     pub max_position: usize,
 }
 
-impl Default for AdapterStats {
-    fn default() -> Self {
-        Self {
-            total_adapters_found: 0,
-            adapter_positions: vec![0; 151],
-            contaminated_reads: 0,
-            adapters_detected: HashMap::new(),
-        }
-    }
-}
-
 pub struct AdapterDetector {
-    adapters: Vec<KnownAdapter>,
-}
-
-#[derive(Debug, Clone)]
-struct KnownAdapter {
-    name: String,
-    sequence: Vec<u8>,
-    matcher: BNDM,
+    matcher: AhoCorasick,
+    /// Family id and display name, indexed by the matcher's pattern id.
+    pattern_families: Vec<(u8, &'static str)>,
+    family_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -46,10 +33,73 @@ pub struct AdapterDetection {
     pub position: usize,
 }
 
+/// Adapter seeds used for detection.
+///
+/// These are deliberately shorter than the full adapter sequences: sequencing
+/// reads often run off the end of an insert and contain only a truncated
+/// adapter. Seeds are long enough (12-15 bp) to be specific in random DNA
+/// while still catching a partially sequenced adapter at the 3' end. The
+/// reverse complement of every seed is searched as well, so both read
+/// orientations are covered.
+///
+/// Entries sharing a name are treated as one adapter family: a read is only
+/// reported once per family, even if several seeds match or the adapter is
+/// present more than once.
+const ADAPTER_SEEDS: &[(&str, &[u8])] = &[
+    // Illumina
+    ("Illumina_TruSeq", b"AGATCGGAAGAGC"),
+    ("Illumina_Nextera", b"TCGTCGGCAGCGT"),
+    ("Illumina_Nextera", b"CTGTCTCTTATAC"),
+    ("Illumina_Small_RNA", b"TGGAATTCTCGG"),
+    // Oxford Nanopore
+    ("ONT_Rapid", b"TTTCTGTTGGTGC"),
+    ("ONT_Ligation", b"GGCGTCTGCTTGG"),
+    // PacBio
+    ("PacBio_SMRTbell", b"ATCTCTCTCTTTTC"),
+    ("PacBio_IsoSeq", b"AAGCAGTGGTATC"),
+    // Homopolymer tails (not strictly adapters, but useful contamination signal)
+    ("PolyA_tail", b"AAAAAAAAAAAA"),
+];
+
 impl AdapterDetector {
     pub fn new() -> Self {
+        let mut patterns = Vec::with_capacity(ADAPTER_SEEDS.len() * 2);
+        let mut pattern_families = Vec::with_capacity(ADAPTER_SEEDS.len() * 2);
+        let mut family_names: Vec<&'static str> = Vec::new();
+
+        for &(name, seed) in ADAPTER_SEEDS {
+            let family_id = match family_names.iter().position(|known| *known == name) {
+                Some(id) => id,
+                None => {
+                    family_names.push(name);
+                    family_names.len() - 1
+                }
+            };
+            assert!(
+                family_names.len() <= MAX_ADAPTER_FAMILIES,
+                "too many adapter families for the per-read bitmask"
+            );
+
+            patterns.push(seed.to_vec());
+            pattern_families.push((family_id as u8, name));
+
+            let rc = Self::revcomp(seed);
+            if rc.as_slice() != seed {
+                patterns.push(rc);
+                pattern_families.push((family_id as u8, name));
+            }
+        }
+
+        let matcher = AhoCorasickBuilder::new()
+            .ascii_case_insensitive(true)
+            .match_kind(MatchKind::LeftmostFirst)
+            .build(patterns)
+            .expect("adapter seeds are valid patterns");
+
         Self {
-            adapters: Self::default_adapters(),
+            matcher,
+            pattern_families,
+            family_count: family_names.len(),
         }
     }
 
@@ -72,67 +122,42 @@ impl AdapterDetector {
         rc
     }
 
-    fn default_adapters() -> Vec<KnownAdapter> {
-        macro_rules! add_adapter {
-            ($vec:ident, $name:expr, $seq:expr) => {{
-                let seq = $seq.to_vec();
-                let rc = Self::revcomp(&seq);
-                $vec.push(KnownAdapter {
-                    name: $name.to_string(),
-                    matcher: BNDM::new(&seq),
-                    sequence: seq,
-                });
-                $vec.push(KnownAdapter {
-                    name: format!("{}_RC", $name),
-                    matcher: BNDM::new(&rc),
-                    sequence: rc,
-                });
-            }};
+    /// Find adapter contamination in one read.
+    ///
+    /// Matching is case-insensitive and reports at most one hit per adapter
+    /// family. The reported position is the start of the first matching seed.
+    pub fn detect_adapters(&self, sequence: &[u8]) -> Vec<AdapterDetection> {
+        if sequence.is_empty() {
+            return Vec::new();
         }
 
-        let mut adapters = Vec::new();
-
-        // Illumina
-        add_adapter!(adapters, "TruSeq_Universal", b"AGATCGGAAGAGCACAC");
-        add_adapter!(adapters, "TruSeq_Index", b"AGATCGGAAGAGCGTCG");
-        add_adapter!(adapters, "Nextera", b"TCGTCGGCAGCGTCAGA");
-        add_adapter!(adapters, "PolyA", b"AAAAAAAAAAAAAAA");
-
-        // Oxford Nanopore (ONT) - rapid adapters
-        add_adapter!(adapters, "ONT_Rapid_Adapter_1", b"TTTCTGTTGGTGCTGATATTGC");
-        add_adapter!(adapters, "ONT_Rapid_Adapter_2", b"ACTTGCCTGTCGCTCTATCTTC");
-
-        // ONT ligation adapters (common prefix)
-        add_adapter!(adapters, "ONT_Ligation_Adapter_1", b"AGATCGGAAGAGCACACGTC");
-        add_adapter!(adapters, "ONT_Ligation_Adapter_2", b"AGATCGGAAGAGCGTCGTGT");
-
-        // PacBio SMRTbell hairpin adapters (short prefix of forward)
-        add_adapter!(adapters, "PacBio_SMRTbell_FWD", b"ATCTCTCTCTTTTCCTCCTCC");
-        add_adapter!(adapters, "PacBio_SMRTbell_REV", b"ATCTCTCTCAACAACAACAA");
-
-        // PacBio Iso-Seq universal primer
-        add_adapter!(adapters, "PacBio_IsoSeq_Primer", b"AAGCAGTGGTATCAACGCAG");
-
-        adapters
-    }
-
-    pub fn detect_adapters(&self, sequence: &[u8]) -> Vec<AdapterDetection> {
+        let mut seen_families = 0u64;
         let mut detections = Vec::new();
 
-        for adapter in &self.adapters {
-            if adapter.sequence.len() > sequence.len() {
+        // All seeds (forward and reverse complement) are matched in a single
+        // case-insensitive pass. Leftmost-first keeps the results
+        // non-overlapping.
+        for found in self.matcher.find_iter(sequence) {
+            let (family_id, name) = self.pattern_families[found.pattern().as_usize()];
+            let family_bit = 1u64 << family_id;
+            if seen_families & family_bit != 0 {
                 continue;
             }
-            for pos in adapter.matcher.find_all(sequence) {
-                detections.push(AdapterDetection {
-                    adapter_name: adapter.name.clone(),
-                    position: pos,
-                });
+
+            seen_families |= family_bit;
+            detections.push(AdapterDetection {
+                adapter_name: name.to_string(),
+                position: found.start(),
+            });
+
+            if detections.len() == self.family_count {
+                break;
             }
         }
 
         detections
     }
+
     pub fn update_stats(&self, stats: &mut AdapterStats, detections: &[AdapterDetection]) {
         if detections.is_empty() {
             return;
@@ -142,21 +167,11 @@ impl AdapterDetector {
         stats.total_adapters_found += detections.len() as u64;
 
         for detection in detections {
-            if detection.position < stats.adapter_positions.len() {
-                stats.adapter_positions[detection.position] += 1;
-            }
-
-            // Normalize adapter name by stripping "_RC" suffix if present
-            let base_name = detection
-                .adapter_name
-                .strip_suffix("_RC")
-                .unwrap_or(&detection.adapter_name);
-
             let entry = stats
                 .adapters_detected
-                .entry(base_name.to_string())
+                .entry(detection.adapter_name.clone())
                 .or_insert_with(|| AdapterMatch {
-                    name: base_name.to_string(),
+                    name: detection.adapter_name.clone(),
                     count: 0,
                     avg_position: 0.0,
                     min_position: usize::MAX,
@@ -214,10 +229,89 @@ mod tests {
 
         assert!(
             !detections.is_empty(),
-            "Should detect TruSeq_Universal adapter"
+            "Should detect Illumina_TruSeq adapter"
         );
-        assert_eq!(detections[0].adapter_name, "TruSeq_Universal");
+        assert_eq!(detections[0].adapter_name, "Illumina_TruSeq");
         assert_eq!(detections[0].position, 32);
+    }
+
+    #[test]
+    fn test_reverse_complement_adapter_detection() {
+        let detector = AdapterDetector::new();
+        let adapter = AdapterDetector::revcomp(b"AGATCGGAAGAGC");
+        let mut sequence = b"GCTAGCTAGCTAGCTAGCTA".to_vec();
+        sequence.extend_from_slice(&adapter);
+
+        let detections = detector.detect_adapters(&sequence);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].adapter_name, "Illumina_TruSeq");
+        assert_eq!(detections[0].position, 20);
+    }
+
+    #[test]
+    fn test_case_insensitive_detection() {
+        let detector = AdapterDetector::new();
+        let mut sequence = b"GCTAGCTAGCTA".to_vec();
+        sequence.extend_from_slice(b"agatcggaagagc");
+
+        let detections = detector.detect_adapters(&sequence);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].adapter_name, "Illumina_TruSeq");
+        assert_eq!(detections[0].position, 12);
+    }
+
+    #[test]
+    fn test_truncated_adapter_at_read_end() {
+        let detector = AdapterDetector::new();
+        // Only the first 13 bases of the adapter were sequenced.
+        let mut sequence = b"GCTAGCTAGCTAGCTAGCTAGCTA".to_vec();
+        sequence.extend_from_slice(b"AGATCGGAAGAGC");
+
+        let detections = detector.detect_adapters(&sequence);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].adapter_name, "Illumina_TruSeq");
+        assert_eq!(detections[0].position, 24);
+    }
+
+    #[test]
+    fn test_shared_prefix_counts_once_per_family() {
+        let detector = AdapterDetector::new();
+        // TruSeq Universal followed by TruSeq Index: both share the seed,
+        // but this is still a single adapter family in one read.
+        let sequence = b"AGATCGGAAGAGCACACAGATCGGAAGAGCGTCGTGT";
+
+        let detections = detector.detect_adapters(sequence);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].adapter_name, "Illumina_TruSeq");
+    }
+
+    #[test]
+    fn test_multiple_seeds_for_one_family_count_once() {
+        let detector = AdapterDetector::new();
+        // Two different Nextera seeds in the same read.
+        let sequence = b"TCGTCGGCAGCGTACGTACGTACGTCTGTCTCTTATAC";
+
+        let detections = detector.detect_adapters(sequence);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].adapter_name, "Illumina_Nextera");
+    }
+
+    #[test]
+    fn test_no_false_positive_on_random_sequence() {
+        let detector = AdapterDetector::new();
+        let sequence = b"GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCT";
+
+        assert!(detector.detect_adapters(sequence).is_empty());
+    }
+
+    #[test]
+    fn test_poly_t_tail_detected_as_poly_a_family() {
+        let detector = AdapterDetector::new();
+        let sequence = b"GCTAGCTAGCTAGCTTTTTTTTTTTTTTTT";
+
+        let detections = detector.detect_adapters(sequence);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].adapter_name, "PolyA_tail");
     }
 
     #[test]
@@ -225,9 +319,8 @@ mod tests {
         let detector = AdapterDetector::new();
         let mut stats = AdapterStats::default();
 
-        // Create a detection
         let detections = vec![AdapterDetection {
-            adapter_name: "TruSeq_Universal".to_string(),
+            adapter_name: "Illumina_TruSeq".to_string(),
             position: 50,
         }];
 
@@ -235,11 +328,36 @@ mod tests {
 
         assert_eq!(stats.contaminated_reads, 1);
         assert_eq!(stats.total_adapters_found, 1);
-        assert_eq!(stats.adapter_positions[50], 1);
-        assert!(stats.adapters_detected.contains_key("TruSeq_Universal"));
+        assert!(stats.adapters_detected.contains_key("Illumina_TruSeq"));
 
-        let adapter_match = stats.adapters_detected.get("TruSeq_Universal").unwrap();
+        let adapter_match = stats.adapters_detected.get("Illumina_TruSeq").unwrap();
         assert_eq!(adapter_match.count, 1);
         assert_eq!(adapter_match.avg_position, 50.0);
+        assert_eq!(adapter_match.min_position, 50);
+        assert_eq!(adapter_match.max_position, 50);
+    }
+
+    #[test]
+    fn test_stats_average_position_and_counts() {
+        let detector = AdapterDetector::new();
+        let mut stats = AdapterStats::default();
+
+        for position in [10, 20, 60] {
+            detector.update_stats(
+                &mut stats,
+                &[AdapterDetection {
+                    adapter_name: "Illumina_TruSeq".to_string(),
+                    position,
+                }],
+            );
+        }
+
+        let adapter_match = stats.adapters_detected.get("Illumina_TruSeq").unwrap();
+        assert_eq!(stats.contaminated_reads, 3);
+        assert_eq!(stats.total_adapters_found, 3);
+        assert_eq!(adapter_match.count, 3);
+        assert_eq!(adapter_match.avg_position, 30.0);
+        assert_eq!(adapter_match.min_position, 10);
+        assert_eq!(adapter_match.max_position, 60);
     }
 }
