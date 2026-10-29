@@ -1,7 +1,8 @@
 use crate::adapter::{AdapterDetector, AdapterStats};
 use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
-use crate::reader::{FastqReader, RecordReader};
+use crate::reader::open_source;
+use crate::record::Record;
 use crate::search::{MatchScratch, Pattern, SearchIndex, SearchScope};
 use crate::utils::{
     calculate_record_lines, determine_min_max_phred, translate_frames,
@@ -9,7 +10,6 @@ use crate::utils::{
 };
 use anyhow::Result;
 use bio::alphabets::dna;
-use bio::io::fastq;
 use nix::poll::PollFlags;
 use nix::poll::{poll, PollFd};
 use num_format::{Locale, ToFormattedString};
@@ -379,7 +379,7 @@ fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph<'_> {
 
 impl TuiViewer {
     /// Calculate how many lines a record takes on screen
-    fn calculate_record_lines(&self, record: &fastq::Record, terminal_width: usize) -> usize {
+    fn calculate_record_lines(&self, record: &Record, terminal_width: usize) -> usize {
         calculate_record_lines(
             record,
             terminal_width,
@@ -394,8 +394,8 @@ impl TuiViewer {
     /// (+ quality) + 1 R2 seq (+ quality), plus the gutter prefix.
     fn calculate_paired_record_lines(
         &self,
-        r1: &fastq::Record,
-        r2: &fastq::Record,
+        r1: &Record,
+        r2: &Record,
         terminal_width: usize,
     ) -> usize {
         let header_lines = 1;
@@ -1134,7 +1134,7 @@ impl TuiViewer {
         done: Arc<AtomicBool>,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<()> {
-        let mut reader = RecordReader::new(FastqReader::new(file_path)?.into_fastq_reader());
+        let mut reader = open_source(file_path)?;
         let mut record_idx = 0u64;
         let mut scratch = MatchScratch::new();
         while let Some(record) = reader.next_record()? {
@@ -1165,7 +1165,7 @@ impl TuiViewer {
             return Ok(());
         }
 
-        let mut reader = RecordReader::new(FastqReader::new(file_path)?.into_fastq_reader());
+        let mut reader = open_source(file_path)?;
         let mut total_reads = 0u64;
 
         while reader.next_record()?.is_some() {
@@ -1196,7 +1196,7 @@ impl TuiViewer {
     fn calculate_stats_background(
         stats: Arc<Mutex<FastqStats>>,
         file_path: &str,
-        reads: Arc<RwLock<Vec<fastq::Record>>>,
+        reads: Arc<RwLock<Vec<Record>>>,
         phred_range: PhredRange,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<()> {
@@ -1219,7 +1219,7 @@ impl TuiViewer {
         let is_stdin = file_path == "-";
 
         {
-            let mut process_record = |record: &fastq::Record| -> Result<bool> {
+            let mut process_record = |record: &Record| -> Result<bool> {
                 if stop_flag.load(Ordering::Relaxed) {
                     return Ok(false);
                 }
@@ -1231,7 +1231,7 @@ impl TuiViewer {
                 max_length = max_length.max(seq_len);
 
                 let seq = record.seq();
-                let qual = record.qual();
+                let qual = record.qual().unwrap_or_default();
 
                 // Combined pass through sequence for GC/N content and adapter detection
                 // This is more cache-friendly than separate passes
@@ -1336,8 +1336,7 @@ impl TuiViewer {
                     }
                 }
             } else {
-                let mut reader =
-                    RecordReader::new(FastqReader::new(file_path)?.into_fastq_reader());
+                let mut reader = open_source(file_path)?;
                 while let Some(record) = reader.next_record()? {
                     if !process_record(record)? {
                         return Ok(());
@@ -1554,12 +1553,21 @@ impl TuiViewer {
     /// Return the sequence and quality of a record in the currently selected
     /// orientation. Quality stays paired with its base, so it is reversed
     /// together with the sequence for the reverse complement.
-    fn oriented_seq_qual(&self, record: &fastq::Record) -> (Vec<u8>, Vec<u8>) {
+    fn oriented_seq_qual(&self, record: &Record) -> (Vec<u8>, Vec<u8>) {
         match self.orientation {
-            ReadOrientation::AsIs => (record.seq().to_vec(), record.qual().to_vec()),
+            ReadOrientation::AsIs => (
+                record.seq().to_vec(),
+                record.qual().unwrap_or_default().to_vec(),
+            ),
             ReadOrientation::ReverseComplement => (
                 dna::revcomp(record.seq()),
-                record.qual().iter().rev().copied().collect(),
+                record
+                    .qual()
+                    .unwrap_or_default()
+                    .iter()
+                    .rev()
+                    .copied()
+                    .collect(),
             ),
         }
     }

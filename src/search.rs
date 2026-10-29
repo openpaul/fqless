@@ -1,6 +1,7 @@
 use bio::alphabets::dna;
 use bio::pattern_matching::bom::BOM;
 
+use crate::record::Record;
 use crate::utils::translate_frames;
 
 /// Bitmap of which records contain at least one search match. One bit per
@@ -378,7 +379,7 @@ impl SearchScope {
 
     /// Convenience wrapper for tests.
     #[cfg(test)]
-    pub fn matches(&self, pattern: &Pattern, record: &bio::io::fastq::Record) -> bool {
+    pub fn matches(&self, pattern: &Pattern, record: &Record) -> bool {
         self.matches_with(pattern, record, &mut MatchScratch::new())
     }
 
@@ -386,7 +387,7 @@ impl SearchScope {
     pub fn matches_with(
         &self,
         pattern: &Pattern,
-        record: &bio::io::fastq::Record,
+        record: &Record,
         scratch: &mut MatchScratch,
     ) -> bool {
         let seq_match = matches!(self, SearchScope::Sequence | SearchScope::SequenceAndId)
@@ -801,13 +802,13 @@ mod tests {
         assert_eq!(p.find_id_matches(b"x_car_y"), vec![(2, 5)]);
     }
 
-    fn record(id: &str, seq: &str) -> bio::io::fastq::Record {
+    fn record(id: &str, seq: &str) -> Record {
         record_with_desc(id, None, seq)
     }
 
-    fn record_with_desc(id: &str, desc: Option<&str>, seq: &str) -> bio::io::fastq::Record {
+    fn record_with_desc(id: &str, desc: Option<&str>, seq: &str) -> Record {
         let qual = vec![b'I'; seq.len()];
-        bio::io::fastq::Record::with_attrs(id, desc, seq.as_bytes(), &qual)
+        Record::with_attrs(id, desc, seq.as_bytes(), Some(&qual))
     }
 
     #[test]

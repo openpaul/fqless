@@ -3,6 +3,7 @@ mod app;
 mod buffer;
 mod color;
 mod reader;
+mod record;
 mod search;
 mod utils;
 mod viewer;

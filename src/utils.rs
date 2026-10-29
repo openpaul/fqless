@@ -1,5 +1,5 @@
+use crate::record::Record;
 use bio::alphabets::dna;
-use bio::io::fastq;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhredRange {
@@ -246,12 +246,12 @@ pub fn translate_frames(seq: &[u8]) -> Vec<String> {
         .collect()
 }
 
-pub fn determine_min_max_phred(records: &[fastq::Record]) -> (u8, u8) {
+pub fn determine_min_max_phred(records: &[Record]) -> (u8, u8) {
     let mut min_phred = u8::MAX;
     let mut max_phred = u8::MIN;
 
     for record in records {
-        for &q in record.qual() {
+        for &q in record.qual().unwrap_or_default() {
             min_phred = min_phred.min(q);
             max_phred = max_phred.max(q);
         }
@@ -260,9 +260,9 @@ pub fn determine_min_max_phred(records: &[fastq::Record]) -> (u8, u8) {
     (min_phred, max_phred)
 }
 
-/// Calculate how many lines a FASTQ record takes on screen
+/// Calculate how many lines a sequencing record takes on screen
 pub fn calculate_record_lines(
-    record: &fastq::Record,
+    record: &Record,
     terminal_width: usize,
     no_wrap: bool,
     show_quality: bool,
@@ -337,10 +337,8 @@ mod tests {
 
     #[test]
     fn test_determine_min_max_phred() {
-        use bio::io::fastq::Record;
-
         // Create a record with known quality scores
-        let record = Record::with_attrs("test", None, b"ACGT", b"!IJK"); // ASCII 33, 73, 74, 75
+        let record = Record::with_attrs("test", None, b"ACGT", Some(b"!IJK")); // ASCII 33, 73, 74, 75
 
         let records = vec![record];
         let (min, max) = determine_min_max_phred(&records);
@@ -351,10 +349,8 @@ mod tests {
 
     #[test]
     fn test_calculate_record_lines() {
-        use bio::io::fastq::Record;
-
         // Create a test record with 100bp sequence
-        let record = Record::with_attrs("test", None, b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", b"IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII");
+        let record = Record::with_attrs("test", None, b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT", Some(b"IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII"));
 
         // Test with wrapping, no quality - 100bp in 80 width terminal = 2 lines + 1 header = 3 lines
         let lines = calculate_record_lines(&record, 80, false, false, false);
@@ -371,10 +367,8 @@ mod tests {
 
     #[test]
     fn test_calculate_record_lines_translation() {
-        use bio::io::fastq::Record;
-
         // 9 bases -> 6 frames, each 1 line (fits in width) -> 7 lines total
-        let record = Record::with_attrs("test", None, b"ATGAAATAA", b"IIIIIIIII");
+        let record = Record::with_attrs("test", None, b"ATGAAATAA", Some(b"IIIIIIIII"));
 
         let lines = calculate_record_lines(&record, 80, false, false, true);
         assert_eq!(lines, 7); // 1 header + 6 frames

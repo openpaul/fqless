@@ -1,16 +1,37 @@
+use crate::record::Record;
 use anyhow::{Context, Result};
 use bio::io::fastq::{self, FastqRead};
 use flate2::bufread::MultiGzDecoder;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek};
 
-/// Unified reader that handles both files and stdin, with automatic compression detection
-pub struct FastqReader {
+/// A source of sequencing records, independent of the file format.
+///
+/// The returned reference is only valid until the next call; callers that need
+/// to keep a record around must clone it. Reusing one record keeps whole-file
+/// scans allocation-free.
+pub trait RecordSource {
+    fn next_record(&mut self) -> Result<Option<&Record>>;
+}
+
+/// Open `path` (or stdin for `-`) and choose a parser for its contents.
+///
+/// Only FASTQ exists so far; FASTA, SAM, BAM and CRAM plug in here later.
+pub fn open_source(path: &str) -> Result<Box<dyn RecordSource>> {
+    let input = InputReader::new(path)?;
+    Ok(Box::new(FastqSource::new(input.into_fastq_reader())))
+}
+
+/// Unified reader that handles both files and stdin, with automatic compression detection.
+///
+/// This only produces decompressed bytes; interpreting them as a sequencing
+/// format is the job of [`RecordSource`] implementations.
+pub struct InputReader {
     inner: Box<dyn BufRead>,
 }
 
-impl FastqReader {
-    /// Create a new FastqReader from a file path or "-" for stdin
+impl InputReader {
+    /// Create a new reader from a file path or "-" for stdin
     pub fn new(input: &str) -> Result<Self> {
         if input == "-" {
             let stdin = io::stdin();
@@ -22,7 +43,7 @@ impl FastqReader {
             } else {
                 Box::new(buf_reader)
             };
-            Ok(FastqReader { inner: reader })
+            Ok(InputReader { inner: reader })
         } else {
             // Handle file
             let mut file =
@@ -49,42 +70,46 @@ impl FastqReader {
                 }
             };
 
-            Ok(FastqReader { inner: reader })
+            Ok(InputReader { inner: reader })
         }
     }
 
-    /// Get a new FASTQ reader for this input (consumes self)
+    /// Wrap the decompressed stream in a FASTQ reader.
     pub fn into_fastq_reader(self) -> fastq::Reader<BufReader<Box<dyn BufRead>>> {
         fastq::Reader::new(self.inner)
     }
 }
 
-/// Reads into one reusable record. Prefer this over `records()` for whole-file
-/// scans: `records()` allocates a fresh `Record` for every read.
-pub struct RecordReader<R: BufRead> {
-    reader: fastq::Reader<R>,
-    record: fastq::Record,
+/// FASTQ parser built on `bio`'s reader, decoding into [`Record`].
+pub struct FastqSource {
+    reader: fastq::Reader<BufReader<Box<dyn BufRead>>>,
+    scratch: fastq::Record,
+    record: Record,
     done: bool,
 }
 
-impl<R: BufRead> RecordReader<R> {
-    pub fn new(reader: fastq::Reader<R>) -> Self {
+impl FastqSource {
+    pub fn new(reader: fastq::Reader<BufReader<Box<dyn BufRead>>>) -> Self {
         Self {
             reader,
-            record: fastq::Record::new(),
+            scratch: fastq::Record::new(),
+            record: Record::new(),
             done: false,
         }
     }
+}
 
-    pub fn next_record(&mut self) -> Result<Option<&fastq::Record>> {
+impl RecordSource for FastqSource {
+    fn next_record(&mut self) -> Result<Option<&Record>> {
         if self.done {
             return Ok(None);
         }
-        self.reader.read(&mut self.record)?;
-        if self.record.is_empty() {
+        self.reader.read(&mut self.scratch)?;
+        if self.scratch.is_empty() {
             self.done = true;
             return Ok(None);
         }
+        self.record.set_from_fastq(&self.scratch);
         Ok(Some(&self.record))
     }
 }
@@ -92,7 +117,6 @@ impl<R: BufRead> RecordReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bio::io::fastq::FastqRead;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -126,12 +150,16 @@ mod tests {
         file
     }
 
+    fn next_owned(source: &mut dyn RecordSource) -> Result<Option<Record>> {
+        Ok(source.next_record()?.cloned())
+    }
+
     #[test]
     fn test_new_with_plain_text_file() {
         let temp_file = create_temp_fastq(SAMPLE_FASTQ);
         let path = temp_file.path().to_str().unwrap();
 
-        let reader = FastqReader::new(path);
+        let reader = InputReader::new(path);
         assert!(
             reader.is_ok(),
             "Failed to create reader for plain text file"
@@ -143,7 +171,7 @@ mod tests {
         let temp_file = create_temp_gzipped_fastq(SAMPLE_FASTQ);
         let path = temp_file.path().to_str().unwrap();
 
-        let reader = FastqReader::new(path);
+        let reader = InputReader::new(path);
         assert!(
             reader.is_ok(),
             "Failed to create reader for gzipped file: {:?}",
@@ -153,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_new_with_nonexistent_file() {
-        let result = FastqReader::new("/nonexistent/path/to/file.fastq");
+        let result = InputReader::new("/nonexistent/path/to/file.fastq");
         assert!(result.is_err(), "Should fail when opening nonexistent file");
 
         let error_msg = format!("{}", result.err().unwrap());
@@ -168,116 +196,113 @@ mod tests {
         let temp_file = create_temp_fastq("");
         let path = temp_file.path().to_str().unwrap();
 
-        let reader = FastqReader::new(path);
+        let reader = InputReader::new(path);
         assert!(reader.is_ok(), "Should handle empty file gracefully");
     }
 
     #[test]
-    fn test_into_fastq_reader_plain_text() {
+    fn test_open_source_plain_text() {
         let temp_file = create_temp_fastq(SAMPLE_FASTQ);
         let path = temp_file.path().to_str().unwrap();
 
-        let reader = FastqReader::new(path).expect("Failed to create FastqReader");
-        let mut fastq_reader = reader.into_fastq_reader();
+        let mut source = open_source(path).expect("Failed to open source");
+        let record = source.next_record().expect("Failed to read record");
 
-        let mut record = fastq::Record::new();
-        let result = fastq_reader.read(&mut record);
-
-        assert!(result.is_ok(), "Failed to read FASTQ record");
+        let record = record.expect("Expected one record");
         assert_eq!(record.id(), "SEQ_ID");
         assert_eq!(record.seq(), b"GATTACA");
-        assert_eq!(record.qual(), b"IIIIIII");
+        assert_eq!(record.qual(), Some(b"IIIIIII".as_slice()));
+        assert!(source.next_record().unwrap().is_none());
     }
 
     #[test]
-    fn test_into_fastq_reader_gzipped() {
+    fn test_open_source_gzipped() {
         let temp_file = create_temp_gzipped_fastq(SAMPLE_FASTQ);
         let path = temp_file.path().to_str().unwrap();
 
-        let reader = FastqReader::new(path).expect("Failed to create FastqReader");
-        let mut fastq_reader = reader.into_fastq_reader();
+        let mut source = open_source(path).expect("Failed to open source");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
 
-        let mut record = fastq::Record::new();
-        let result = fastq_reader.read(&mut record);
-
-        assert!(
-            result.is_ok(),
-            "Failed to read FASTQ record from gzipped file"
-        );
         assert_eq!(record.id(), "SEQ_ID");
         assert_eq!(record.seq(), b"GATTACA");
-        assert_eq!(record.qual(), b"IIIIIII");
+        assert_eq!(record.qual(), Some(b"IIIIIII".as_slice()));
     }
 
     #[test]
-    fn test_read_multiple_records() {
+    fn test_open_source_multiple_records() {
         let temp_file = create_temp_fastq(MULTI_RECORD_FASTQ);
         let path = temp_file.path().to_str().unwrap();
 
-        let reader = FastqReader::new(path).expect("Failed to create FastqReader");
-        let mut fastq_reader = reader.into_fastq_reader();
+        let mut source = open_source(path).expect("Failed to open source");
 
-        // Read first record
-        let mut record1 = fastq::Record::new();
-        fastq_reader
-            .read(&mut record1)
-            .expect("Failed to read first record");
-        assert_eq!(record1.id(), "SEQ1");
-        assert_eq!(record1.seq(), b"GATTACA");
+        let first = next_owned(source.as_mut())
+            .expect("Failed to read first record")
+            .expect("Expected a first record");
+        assert_eq!(first.id(), "SEQ1");
+        assert_eq!(first.seq(), b"GATTACA");
 
-        // Read second record
-        let mut record2 = fastq::Record::new();
-        fastq_reader
-            .read(&mut record2)
-            .expect("Failed to read second record");
-        assert_eq!(record2.id(), "SEQ2");
-        assert_eq!(record2.seq(), b"ACGTACGT");
+        let second = next_owned(source.as_mut())
+            .expect("Failed to read second record")
+            .expect("Expected a second record");
+        assert_eq!(second.id(), "SEQ2");
+        assert_eq!(second.seq(), b"ACGTACGT");
+
+        assert!(source.next_record().unwrap().is_none());
     }
 
     #[test]
-    fn test_record_reader_reuses_one_record() {
+    fn test_open_source_parses_description() {
+        let temp_file = create_temp_fastq("@read1 some description\nACGT\n+\nIIII\n");
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open source");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.id(), "read1");
+        assert_eq!(record.desc(), Some("some description"));
+    }
+
+    #[test]
+    fn test_open_source_multiline_sequence() {
+        let temp_file = create_temp_fastq("@read1\nACGT\nACGT\n+\nIIIIIIII\n");
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open source");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.seq(), b"ACGTACGT");
+        assert_eq!(record.qual(), Some(b"IIIIIIII".as_slice()));
+    }
+
+    #[test]
+    fn test_record_source_reuses_record_buffers() {
         let content = "@A\nAAAA\n+\nIIII\n@B\nCCCC\n+\nIIII\n";
         let temp_file = create_temp_fastq(content);
         let path = temp_file.path().to_str().unwrap();
-        let reader = FastqReader::new(path).expect("Failed to create FastqReader");
-        let mut records = RecordReader::new(reader.into_fastq_reader());
+        let mut source = open_source(path).expect("Failed to open source");
 
         let (id1, seq_ptr1) = {
-            let record = records.next_record().unwrap().unwrap();
+            let record = source.next_record().unwrap().unwrap();
             (record.id().to_string(), record.seq().as_ptr())
         };
         let (id2, seq_ptr2) = {
-            let record = records.next_record().unwrap().unwrap();
+            let record = source.next_record().unwrap().unwrap();
             (record.id().to_string(), record.seq().as_ptr())
         };
 
         assert_eq!(id1, "A");
         assert_eq!(id2, "B");
         assert_eq!(seq_ptr1, seq_ptr2, "record buffer should be reused");
-        assert!(records.next_record().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_read_multiple_records_gzipped() {
-        let temp_file = create_temp_gzipped_fastq(MULTI_RECORD_FASTQ);
-        let path = temp_file.path().to_str().unwrap();
-
-        let reader = FastqReader::new(path).expect("Failed to create FastqReader");
-        let mut fastq_reader = reader.into_fastq_reader();
-
-        // Read first record
-        let mut record1 = fastq::Record::new();
-        fastq_reader
-            .read(&mut record1)
-            .expect("Failed to read first record from gzipped file");
-        assert_eq!(record1.id(), "SEQ1");
-
-        // Read second record
-        let mut record2 = fastq::Record::new();
-        fastq_reader
-            .read(&mut record2)
-            .expect("Failed to read second record from gzipped file");
-        assert_eq!(record2.id(), "SEQ2");
+        assert!(source.next_record().unwrap().is_none());
     }
 
     #[test]
@@ -298,7 +323,7 @@ mod tests {
         );
 
         // Now test that reader handles it correctly
-        let reader = FastqReader::new(path);
+        let reader = InputReader::new(path);
         assert!(
             reader.is_ok(),
             "Should successfully create reader for gzipped file"
@@ -307,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_large_file_handling() {
-        // Create a FASTQ file with 10 records (reduced for faster testing)
+        // Create a FASTQ file with 100000 records
         let mut large_content = String::new();
         for i in 0..100000 {
             large_content.push_str(&format!(
@@ -319,16 +344,10 @@ mod tests {
         let temp_file = create_temp_fastq(&large_content);
         let path = temp_file.path().to_str().unwrap();
 
-        let reader = FastqReader::new(path).expect("Failed to create FastqReader");
-        let mut fastq_reader = reader.into_fastq_reader();
+        let mut source = open_source(path).expect("Failed to open source");
 
         let mut count = 0;
-        let mut record = fastq::Record::new();
-        // Check if record has actual data (non-empty ID) to detect EOF
-        while let Ok(()) = fastq_reader.read(&mut record) {
-            if record.is_empty() {
-                break;
-            }
+        while source.next_record().unwrap().is_some() {
             count += 1;
         }
 
@@ -339,7 +358,7 @@ mod tests {
     fn test_file_path_with_context() {
         // Test that error messages include the file path
         let bad_path = "/tmp/definitely_does_not_exist_12345.fastq";
-        let result = FastqReader::new(bad_path);
+        let result = InputReader::new(bad_path);
 
         assert!(result.is_err());
         let error_msg = format!("{}", result.err().unwrap());
