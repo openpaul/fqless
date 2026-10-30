@@ -108,6 +108,8 @@ pub struct TuiViewer {
     buffer_r2: DisplayBuffer,
     file_path: String,
     file_path_r2: String,
+    /// FASTA used to decode CRAM input; ignored by the other formats.
+    reference: Option<String>,
     is_paired: bool,
     current_position: u64,
     horizontal_offset: usize,
@@ -625,7 +627,11 @@ impl TuiViewer {
         Ok(new_position)
     }
 
-    pub fn new(file_path: String, file_path_opt2: Option<String>) -> Result<Self> {
+    pub fn new(
+        file_path: String,
+        file_path_opt2: Option<String>,
+        reference: Option<String>,
+    ) -> Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
         flag::register(SIGINT, Arc::clone(&running))?;
 
@@ -640,15 +646,15 @@ impl TuiViewer {
         let backend = TermionBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
-        let buffer = DisplayBuffer::new(&file_path)?;
+        let buffer = DisplayBuffer::new(&file_path, reference.as_deref())?;
 
         let is_paired = file_path_opt2.is_some();
         let file_path_2 = file_path_opt2.unwrap_or_default();
         let buffer_r2 = if is_paired {
-            DisplayBuffer::new(&file_path_2)?
+            DisplayBuffer::new(&file_path_2, reference.as_deref())?
         } else {
             // Dummy buffer — not used when is_paired is false
-            DisplayBuffer::new(&file_path)?
+            DisplayBuffer::new(&file_path, reference.as_deref())?
         };
 
         let mut viewer = TuiViewer {
@@ -657,6 +663,7 @@ impl TuiViewer {
             buffer_r2,
             file_path: file_path.clone(),
             file_path_r2: file_path_2,
+            reference,
             is_paired,
             current_position: 0,
             horizontal_offset: 0,
@@ -726,11 +733,13 @@ impl TuiViewer {
         // Start fast read counter thread first
         let stats_for_counter = Arc::clone(&self.stats);
         let file_path_for_counter = file_path.clone();
+        let reference_for_counter = self.reference.clone();
         let stop_flag_for_counter = Arc::clone(&self.stats_stop_flag);
         thread::spawn(move || {
             if let Err(e) = Self::count_reads_fast(
                 stats_for_counter,
                 file_path_for_counter.as_str(),
+                reference_for_counter.as_deref(),
                 stop_flag_for_counter,
             ) {
                 eprintln!("Read counting error: {}", e);
@@ -738,10 +747,12 @@ impl TuiViewer {
         });
 
         // Start main stats worker
+        let reference = self.reference.clone();
         let handle = thread::spawn(move || {
             if let Err(e) = Self::calculate_stats_background(
                 stats_clone,
                 file_path.as_str(),
+                reference.as_deref(),
                 reads,
                 phred_range,
                 stop_flag,
@@ -784,21 +795,25 @@ impl TuiViewer {
 
         let stats_for_counter = Arc::clone(&self.stats_r2);
         let file_path_for_counter = file_path.clone();
+        let reference_for_counter = self.reference.clone();
         let stop_flag_for_counter = Arc::clone(&self.stats_stop_flag_r2);
         thread::spawn(move || {
             if let Err(e) = Self::count_reads_fast(
                 stats_for_counter,
                 file_path_for_counter.as_str(),
+                reference_for_counter.as_deref(),
                 stop_flag_for_counter,
             ) {
                 eprintln!("Read counting error (R2): {}", e);
             }
         });
 
+        let reference = self.reference.clone();
         let handle = thread::spawn(move || {
             if let Err(e) = Self::calculate_stats_background(
                 stats_clone,
                 file_path.as_str(),
+                reference.as_deref(),
                 reads,
                 phred_range,
                 stop_flag,
@@ -1081,11 +1096,19 @@ impl TuiViewer {
         let done = Arc::clone(&self.search_worker_done);
         let stop_flag = Arc::clone(&self.search_stop_flag);
         let file_path = self.file_path.clone();
+        let reference = self.reference.clone();
         let scope = self.search_scope;
 
         let handle = thread::spawn(move || {
             if let Err(e) = Self::search_background(
-                &pattern, scope, &file_path, index, scanned, done, stop_flag,
+                &pattern,
+                scope,
+                &file_path,
+                reference.as_deref(),
+                index,
+                scanned,
+                done,
+                stop_flag,
             ) {
                 eprintln!("Search error: {}", e);
             }
@@ -1120,11 +1143,19 @@ impl TuiViewer {
         let done = Arc::clone(&self.search_worker_done_r2);
         let stop_flag = Arc::clone(&self.search_stop_flag_r2);
         let file_path = self.file_path_r2.clone();
+        let reference = self.reference.clone();
         let scope = self.search_scope;
 
         let handle = thread::spawn(move || {
             if let Err(e) = Self::search_background(
-                &pattern, scope, &file_path, index, scanned, done, stop_flag,
+                &pattern,
+                scope,
+                &file_path,
+                reference.as_deref(),
+                index,
+                scanned,
+                done,
+                stop_flag,
             ) {
                 eprintln!("Search error (R2): {}", e);
             }
@@ -1142,16 +1173,18 @@ impl TuiViewer {
     /// Background search: stream the file once, setting index bits for every
     /// record containing a match. This provides look-ahead past the loaded
     /// buffer without storing anything but the one-bit-per-record index.
+    #[allow(clippy::too_many_arguments)]
     fn search_background(
         pattern: &Pattern,
         scope: SearchScope,
         file_path: &str,
+        reference: Option<&str>,
         index: Arc<Mutex<SearchIndex>>,
         scanned: Arc<AtomicU64>,
         done: Arc<AtomicBool>,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<()> {
-        let mut reader = open_source(file_path)?;
+        let mut reader = open_source(file_path, reference)?;
         let mut record_idx = 0u64;
         let mut scratch = MatchScratch::new();
         while let Some(record) = reader.next_record()? {
@@ -1175,6 +1208,7 @@ impl TuiViewer {
     fn count_reads_fast(
         stats: Arc<Mutex<FastqStats>>,
         file_path: &str,
+        reference: Option<&str>,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<()> {
         // Skip counting for stdin (can't read twice)
@@ -1182,7 +1216,7 @@ impl TuiViewer {
             return Ok(());
         }
 
-        let mut reader = open_source(file_path)?;
+        let mut reader = open_source(file_path, reference)?;
         let mut total_reads = 0u64;
 
         while reader.next_record()?.is_some() {
@@ -1213,6 +1247,7 @@ impl TuiViewer {
     fn calculate_stats_background(
         stats: Arc<Mutex<FastqStats>>,
         file_path: &str,
+        reference: Option<&str>,
         reads: Arc<RwLock<Vec<Record>>>,
         phred_range: PhredRange,
         stop_flag: Arc<AtomicBool>,
@@ -1362,7 +1397,7 @@ impl TuiViewer {
                     }
                 }
             } else {
-                let mut reader = open_source(file_path)?;
+                let mut reader = open_source(file_path, reference)?;
                 while let Some(record) = reader.next_record()? {
                     if !process_record(record)? {
                         return Ok(());

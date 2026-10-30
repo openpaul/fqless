@@ -12,8 +12,8 @@ pub struct DisplayBuffer {
 
 /// New buffer from file or stdin
 impl DisplayBuffer {
-    pub fn new(file_path: &str) -> Result<Self> {
-        let source = open_source(file_path)?;
+    pub fn new(file_path: &str, reference: Option<&str>) -> Result<Self> {
+        let source = open_source(file_path, reference)?;
 
         let reads = Arc::new(RwLock::new(Vec::new()));
 
@@ -85,7 +85,7 @@ mod tests {
         let temp_file = create_test_fastq_file();
         let path = temp_file.path().to_str().unwrap();
 
-        let buffer = DisplayBuffer::new(path);
+        let buffer = DisplayBuffer::new(path, None);
         assert!(buffer.is_ok(), "Should successfully create DisplayBuffer");
 
         let buffer = buffer.unwrap();
@@ -101,7 +101,7 @@ mod tests {
         let temp_file = create_test_fastq_file();
         let path = temp_file.path().to_str().unwrap();
 
-        let mut buffer = DisplayBuffer::new(path).unwrap();
+        let mut buffer = DisplayBuffer::new(path, None).unwrap();
         buffer.load_window(0, 2).unwrap();
         assert_eq!(buffer.reads.read().unwrap().len(), 2);
 

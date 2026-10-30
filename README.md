@@ -2,7 +2,7 @@
 
 ![Coverage](coverage-badge.svg) ![Coverage (no TUI)](coverage-no-tui-badge.svg)
 
-fqless is a small less-like viewer for FastQ, FASTA, SAM and BAM sequencing files. It allows the user to get a quick glance at their sequencing data without the need for a heavy GUI.
+fqless is a small less-like viewer for FastQ, FASTA, SAM, BAM and CRAM sequencing files. It allows the user to get a quick glance at their sequencing data without the need for a heavy GUI.
 
 It displays the name and the color-coded sequence. It hides the quality line from the user, as this is machine information for machines and not for human beings.
 
@@ -18,20 +18,33 @@ fqless file.fastq.gz
 fqless file.fastq
 fqless file.fasta
 fqless file.fasta.gz
+fqless file.bam
+fqless -r reference.fa file.cram
 ```
 
 The format is detected from the file contents, so FASTQ, FASTA, SAM and BAM
-(plain or gzipped, or piped) work without any extra flags.
+(plain or gzipped, or piped) work without any extra flags. CRAM needs a reference
+FASTA because sequences are stored as differences against it:
+
+```sh
+fqless --reference reference.fa file.cram
+fqless -r reference.fa file.cram
+```
 
 FASTA has no base qualities, so the quality toggle and the quality panels of the
 stats page are unavailable for FASTA input; everything else (search, translation,
 GC/N/length and adapter statistics) works the same.
 
-SAM and BAM files are shown as reads, not alignments: the alignment columns are
-ignored, secondary and supplementary alignments are skipped because they repeat
-a read that is already displayed, and reads on the reverse strand are flipped
-back to their original orientation. BAM records without base qualities are shown
-like FASTA reads.
+SAM, BAM and CRAM files are shown as reads, not alignments: the alignment
+columns are ignored, secondary and supplementary alignments are skipped because
+they repeat a read that is already displayed, and reads on the reverse strand
+are flipped back to their original orientation. BAM and CRAM records without
+base qualities are shown like FASTA reads.
+
+The `example/` directory contains the same reads in FASTQ, FASTA, SAM, BAM and
+CRAM. `scripts/make_example_formats.py` regenerates the first four formats from
+the FASTQ files; `cargo run --example make_cram -- <sam> <reference.fa> <out.cram>`
+turns a SAM example into CRAM plus its `.crai` index.
 
 For paired-end sequencing data, pass both files:
 

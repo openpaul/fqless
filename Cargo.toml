@@ -19,6 +19,9 @@ nix = { version = "0.30", features = ["poll"] }
 noodles-bam = "0.98.0"
 noodles-bgzf = "0.52.0"
 noodles-sam = "0.93.0"
+noodles-cram = "0.102.0"
+noodles-fasta = "0.68.0"
 
 [dev-dependencies]
+noodles-core = "0.21"
 tempfile = "3.13"

@@ -18,16 +18,27 @@ pub trait RecordSource {
 /// Open `path` (or stdin for `-`) and choose a parser from its contents.
 ///
 /// The format is detected from the first non-blank byte of the (decompressed)
-/// stream, so `.fa`/`.fastq` naming and gzip suffixes do not matter. SAM, BAM
-/// and CRAM are detected here as well once they are implemented.
-pub fn open_source(path: &str) -> Result<Box<dyn RecordSource>> {
+/// stream, so `.fa`/`.fastq` naming and gzip suffixes do not matter. `reference`
+/// is the FASTA used to decode CRAM input and is ignored by the other formats.
+pub fn open_source(path: &str, reference: Option<&str>) -> Result<Box<dyn RecordSource>> {
     let mut input = InputReader::new(path)?;
 
-    // BAM is binary, so check its magic first; the stream is already
-    // decompressed, which is why this works for BGZF and plain BAM alike.
+    // BAM and CRAM are binary, so check their magic first; the stream is
+    // already decompressed, which is why this works for BGZF and plain BAM
+    // alike.
     let is_bam = input.peek(4)?.starts_with(b"BAM\x01");
     if is_bam {
         return Ok(Box::new(BamSource::new(input.into_inner())?));
+    }
+
+    let is_cram = input.peek(4)?.starts_with(b"CRAM");
+    if is_cram {
+        let reference = reference.ok_or_else(|| {
+            anyhow::anyhow!(
+                "CRAM input requires a reference FASTA; pass --reference <path> (or -r <path>)"
+            )
+        })?;
+        return Ok(Box::new(CramSource::new(input.into_inner(), reference)?));
     }
 
     let is_fasta = {
@@ -526,6 +537,186 @@ impl RecordSource for BamSource {
     }
 }
 
+/// CRAM parser built on `noodles`.
+///
+/// CRAM stores sequences as differences against a reference, so decoding
+/// requires a reference FASTA. The repository is indexed lazily: an existing
+/// `.fai` is used when present, otherwise the reference is indexed in memory.
+/// Everything below the container layer behaves like BAM: flags filter
+/// secondary/supplementary records, reverse-strand reads are flipped back, and
+/// missing qualities become `qual: None`.
+pub struct CramSource {
+    reader: noodles_cram::io::Reader<Box<dyn BufRead>>,
+    header: noodles_sam::Header,
+    reference: noodles_fasta::Repository,
+    container: noodles_cram::io::reader::Container,
+    pending: std::vec::IntoIter<noodles_sam::alignment::RecordBuf>,
+    record: Record,
+    qual_buf: Vec<u8>,
+    done: bool,
+}
+
+impl CramSource {
+    pub fn new(inner: Box<dyn BufRead>, reference_path: &str) -> Result<Self> {
+        let mut reader = noodles_cram::io::Reader::new(inner);
+        let header = reader
+            .read_header()
+            .context("Failed to read the CRAM header")?;
+        let reference = open_reference(reference_path)?;
+
+        Ok(Self {
+            reader,
+            header,
+            reference,
+            container: noodles_cram::io::reader::Container::default(),
+            pending: Vec::new().into_iter(),
+            record: Record::new(),
+            qual_buf: Vec::new(),
+            done: false,
+        })
+    }
+
+    /// Decode the next container into owned records, if needed.
+    fn read_container(&mut self) -> Result<bool> {
+        let size = self
+            .reader
+            .read_container(&mut self.container)
+            .context("Failed to read a CRAM container")?;
+        if size == 0 {
+            return Ok(false);
+        }
+
+        let compression_header = self
+            .container
+            .compression_header()
+            .context("Failed to read the CRAM compression header")?;
+
+        let mut records = Vec::new();
+        for slice in self.container.slices() {
+            let slice = slice.context("Failed to read a CRAM slice")?;
+            let (core_data, external_data) = slice
+                .decode_blocks()
+                .context("Failed to decode CRAM data blocks")?;
+            let decoded = slice
+                .records(
+                    self.reference.clone(),
+                    &self.header,
+                    &compression_header,
+                    &core_data,
+                    &external_data,
+                )
+                .context("Failed to decode CRAM records")?;
+
+            for record in decoded {
+                let record = noodles_sam::alignment::RecordBuf::try_from_alignment_record(
+                    &self.header,
+                    &record,
+                )
+                .context("Failed to convert a CRAM record")?;
+                records.push(record);
+            }
+        }
+
+        self.pending = records.into_iter();
+        Ok(true)
+    }
+
+    fn load_record(&mut self, src: &noodles_sam::alignment::RecordBuf) -> bool {
+        let flags = src.flags();
+        if flags.is_secondary() || flags.is_supplementary() {
+            return false;
+        }
+
+        let sequence = src.sequence();
+        if sequence.is_empty() {
+            return false;
+        }
+
+        let name = src
+            .name()
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .unwrap_or_default();
+        self.record.set_name(&name, None);
+
+        let seq = self.record.seq_mut();
+        seq.clear();
+        seq.extend(
+            sequence
+                .as_ref()
+                .iter()
+                .map(|base| if *base == b'=' { b'N' } else { *base }),
+        );
+
+        let quality_scores = src.quality_scores();
+        if quality_scores.is_empty() {
+            self.record.set_qual(None);
+        } else {
+            self.qual_buf.clear();
+            self.qual_buf.extend(
+                quality_scores
+                    .as_ref()
+                    .iter()
+                    .map(|score| score.saturating_add(33)),
+            );
+            self.record.set_qual(Some(&self.qual_buf));
+        }
+
+        if flags.is_reverse_complemented() {
+            let revcomp = dna::revcomp(self.record.seq());
+            let seq = self.record.seq_mut();
+            seq.clear();
+            seq.extend_from_slice(&revcomp);
+            if let Some(qual) = self.record.qual_mut() {
+                qual.reverse();
+            }
+        }
+
+        true
+    }
+}
+
+impl RecordSource for CramSource {
+    fn next_record(&mut self) -> Result<Option<&Record>> {
+        loop {
+            if let Some(src) = self.pending.next() {
+                if self.load_record(&src) {
+                    return Ok(Some(&self.record));
+                }
+                continue;
+            }
+
+            if self.done || !self.read_container()? {
+                self.done = true;
+                return Ok(None);
+            }
+        }
+    }
+}
+
+/// Open a reference FASTA as a noodles repository.
+///
+/// The `.fai` next to the file is used when present; otherwise the reference is
+/// indexed in memory so no extra files are written.
+fn open_reference(path: &str) -> Result<noodles_fasta::Repository> {
+    use noodles_fasta as fasta;
+
+    let index = match fasta::fs::read_associated_index(path) {
+        Ok(index) => index,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fasta::fs::index(path)
+            .with_context(|| format!("Failed to index the reference FASTA: {path}"))?,
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to read the FASTA index for {path}"))
+        }
+    };
+
+    let file =
+        File::open(path).with_context(|| format!("Failed to open the reference FASTA: {path}"))?;
+    let reader = fasta::io::IndexedReader::new(BufReader::new(file), index);
+    let adapter = fasta::repository::adapters::IndexedReader::new(reader);
+
+    Ok(fasta::Repository::new(adapter))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +748,92 @@ mod tests {
         let builder = noodles_sam::alignment::RecordBuf::builder()
             .set_name(name)
             .set_flags(flags)
+            .set_sequence(Sequence::from(seq.to_vec()));
+
+        let builder = match qual {
+            Some(qual) => builder.set_quality_scores(QualityScores::from(
+                qual.iter().map(|score| score - 33).collect::<Vec<_>>(),
+            )),
+            None => builder,
+        };
+
+        builder.build()
+    }
+
+    /// Write records to a temporary CRAM file plus the reference FASTA it needs.
+    fn create_temp_cram(
+        records: Vec<noodles_sam::alignment::RecordBuf>,
+        reference_seq: &[u8],
+    ) -> (NamedTempFile, NamedTempFile) {
+        use noodles_fasta as fasta;
+        use noodles_sam::{
+            self as sam,
+            alignment::io::Write as _,
+            header::record::value::{map::ReferenceSequence, Map},
+        };
+        use std::num::NonZeroUsize;
+
+        let mut reference_file = NamedTempFile::new().expect("Failed to create reference file");
+        reference_file
+            .write_all(b">chr1\n")
+            .and_then(|_| reference_file.write_all(reference_seq))
+            .and_then(|_| reference_file.write_all(b"\n"))
+            .expect("Failed to write reference");
+        reference_file.flush().expect("Failed to flush reference");
+
+        let reference =
+            Map::<ReferenceSequence>::new(NonZeroUsize::new(reference_seq.len()).unwrap());
+        let header = sam::Header::builder()
+            .add_reference_sequence("chr1", reference)
+            .build();
+
+        let repository = fasta::Repository::new(vec![fasta::Record::new(
+            fasta::record::Definition::new("chr1", None),
+            fasta::record::Sequence::from(reference_seq.to_vec()),
+        )]);
+
+        let mut writer = noodles_cram::io::writer::Builder::default()
+            .set_reference_sequence_repository(repository)
+            .build_from_writer(Vec::new());
+        writer
+            .write_header(&header)
+            .expect("Failed to write header");
+
+        for record in &records {
+            writer
+                .write_alignment_record(&header, record)
+                .expect("Failed to write record");
+        }
+        writer.try_finish(&header).expect("Failed to finish CRAM");
+
+        let mut file = NamedTempFile::new().expect("Failed to create temp file");
+        file.write_all(writer.get_ref())
+            .expect("Failed to write CRAM");
+        file.flush().expect("Failed to flush temp file");
+
+        (file, reference_file)
+    }
+
+    /// Build a mapped CRAM record for the first 10 bases of the fake reference.
+    fn cram_record(
+        name: &str,
+        flags: noodles_sam::alignment::record::Flags,
+        seq: &[u8],
+        qual: Option<&[u8]>,
+        start: usize,
+    ) -> noodles_sam::alignment::RecordBuf {
+        use noodles_core::Position;
+        use noodles_sam::alignment::{
+            record::cigar::{op::Kind, Op},
+            record_buf::{QualityScores, Sequence},
+        };
+
+        let builder = noodles_sam::alignment::RecordBuf::builder()
+            .set_name(name)
+            .set_flags(flags)
+            .set_reference_sequence_id(0)
+            .set_alignment_start(Position::try_from(start).unwrap())
+            .set_cigar([Op::new(Kind::Match, seq.len())].into_iter().collect())
             .set_sequence(Sequence::from(seq.to_vec()));
 
         let builder = match qual {
@@ -672,7 +949,7 @@ mod tests {
         let temp_file = create_temp_fastq(SAMPLE_FASTQ);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open source");
+        let mut source = open_source(path, None).expect("Failed to open source");
         let record = source.next_record().expect("Failed to read record");
 
         let record = record.expect("Expected one record");
@@ -687,7 +964,7 @@ mod tests {
         let temp_file = create_temp_gzipped_fastq(SAMPLE_FASTQ);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open source");
+        let mut source = open_source(path, None).expect("Failed to open source");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -703,7 +980,7 @@ mod tests {
         let temp_file = create_temp_fastq(MULTI_RECORD_FASTQ);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open source");
+        let mut source = open_source(path, None).expect("Failed to open source");
 
         let first = next_owned(source.as_mut())
             .expect("Failed to read first record")
@@ -725,7 +1002,7 @@ mod tests {
         let temp_file = create_temp_fastq("@read1 some description\nACGT\n+\nIIII\n");
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open source");
+        let mut source = open_source(path, None).expect("Failed to open source");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -740,7 +1017,7 @@ mod tests {
         let temp_file = create_temp_fastq("@read1\nACGT\nACGT\n+\nIIIIIIII\n");
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open source");
+        let mut source = open_source(path, None).expect("Failed to open source");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -755,7 +1032,7 @@ mod tests {
         let content = "@A\nAAAA\n+\nIIII\n@B\nCCCC\n+\nIIII\n";
         let temp_file = create_temp_fastq(content);
         let path = temp_file.path().to_str().unwrap();
-        let mut source = open_source(path).expect("Failed to open source");
+        let mut source = open_source(path, None).expect("Failed to open source");
 
         let (id1, seq_ptr1) = {
             let record = source.next_record().unwrap().unwrap();
@@ -778,7 +1055,7 @@ mod tests {
         let temp_file = create_temp_fastq(content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open FASTA");
+        let mut source = open_source(path, None).expect("Failed to open FASTA");
 
         let first = source
             .next_record()
@@ -807,7 +1084,7 @@ mod tests {
         let temp_file = create_temp_gzipped_fastq(content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open gzipped FASTA");
+        let mut source = open_source(path, None).expect("Failed to open gzipped FASTA");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -823,7 +1100,7 @@ mod tests {
         let temp_file = create_temp_fastq(">seq1\nACGT");
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open FASTA");
+        let mut source = open_source(path, None).expect("Failed to open FASTA");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -840,7 +1117,7 @@ mod tests {
         let temp_file = create_temp_fastq(content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open FASTA");
+        let mut source = open_source(path, None).expect("Failed to open FASTA");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -856,7 +1133,7 @@ mod tests {
         let temp_file = create_temp_fastq("\u{feff}>seq1 desc\nACGT\n");
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open FASTA with BOM");
+        let mut source = open_source(path, None).expect("Failed to open FASTA with BOM");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -872,7 +1149,7 @@ mod tests {
         let temp_file = create_temp_fastq(">seq1\nAC GT\nAC\tGT\n");
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open FASTA");
+        let mut source = open_source(path, None).expect("Failed to open FASTA");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -900,7 +1177,7 @@ mod tests {
         let temp_file = create_temp_fastq("");
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open empty file");
+        let mut source = open_source(path, None).expect("Failed to open empty file");
         assert!(source.next_record().unwrap().is_none());
     }
 
@@ -914,7 +1191,7 @@ mod tests {
         let temp_file = create_temp_fastq(&content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open SAM");
+        let mut source = open_source(path, None).expect("Failed to open SAM");
 
         let first = source
             .next_record()
@@ -940,7 +1217,7 @@ mod tests {
         let temp_file = create_temp_fastq(content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open headerless SAM");
+        let mut source = open_source(path, None).expect("Failed to open headerless SAM");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -955,7 +1232,7 @@ mod tests {
         let temp_file = create_temp_fastq("@HDREAD\nACGT\n+\nIIII\n");
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open FASTQ");
+        let mut source = open_source(path, None).expect("Failed to open FASTQ");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -973,7 +1250,7 @@ mod tests {
         let temp_file = create_temp_fastq(&content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open SAM");
+        let mut source = open_source(path, None).expect("Failed to open SAM");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -995,7 +1272,7 @@ mod tests {
         let temp_file = create_temp_fastq(&content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open SAM");
+        let mut source = open_source(path, None).expect("Failed to open SAM");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -1011,7 +1288,7 @@ mod tests {
         let temp_file = create_temp_fastq(&content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open SAM");
+        let mut source = open_source(path, None).expect("Failed to open SAM");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -1028,7 +1305,7 @@ mod tests {
         let temp_file = create_temp_fastq(&content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open SAM");
+        let mut source = open_source(path, None).expect("Failed to open SAM");
         let error = source
             .next_record()
             .expect_err("A truncated SAM line should fail");
@@ -1049,7 +1326,7 @@ mod tests {
         ]);
         let path = file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open BAM");
+        let mut source = open_source(path, None).expect("Failed to open BAM");
 
         let first = source
             .next_record()
@@ -1081,7 +1358,7 @@ mod tests {
         ]);
         let path = file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open BAM");
+        let mut source = open_source(path, None).expect("Failed to open BAM");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -1105,7 +1382,7 @@ mod tests {
         )]);
         let path = file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open BAM");
+        let mut source = open_source(path, None).expect("Failed to open BAM");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -1122,7 +1399,7 @@ mod tests {
         let file = create_temp_bam(vec![bam_record("noqual", Flags::empty(), b"ACGT", None)]);
         let path = file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open BAM");
+        let mut source = open_source(path, None).expect("Failed to open BAM");
         let record = source
             .next_record()
             .expect("Failed to read record")
@@ -1131,6 +1408,128 @@ mod tests {
         assert_eq!(record.seq(), b"ACGT");
         assert_eq!(record.qual(), None);
         assert!(!record.has_quality());
+    }
+
+    const CRAM_REFERENCE: &[u8] = b"ACGTACGTACGTACGTACGT";
+
+    #[test]
+    fn test_open_source_cram() {
+        use noodles_sam::alignment::record::Flags;
+
+        let (file, reference) = create_temp_cram(
+            vec![cram_record(
+                "read1",
+                Flags::empty(),
+                b"ACGTACGTAC",
+                Some(b"IIIIIIIIII"),
+                1,
+            )],
+            CRAM_REFERENCE,
+        );
+        let path = file.path().to_str().unwrap();
+        let reference = reference.path().to_str().unwrap();
+
+        let mut source = open_source(path, Some(reference)).expect("Failed to open CRAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.id(), "read1");
+        assert_eq!(record.seq(), b"ACGTACGTAC");
+        assert_eq!(record.qual(), Some(b"IIIIIIIIII".as_slice()));
+        assert!(source.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cram_reverse_strand_restores_original_orientation() {
+        use noodles_sam::alignment::record::Flags;
+
+        // The stored bases start at reference position 3, which is where the
+        // reverse complement of the original read sits in the fake reference.
+        let original = b"ACGTACGTAC";
+        let stored = dna::revcomp(original);
+        let (file, reference) = create_temp_cram(
+            vec![cram_record(
+                "rev",
+                Flags::REVERSE_COMPLEMENTED,
+                &stored,
+                Some(b"ABCDEFGHIJ"),
+                3,
+            )],
+            CRAM_REFERENCE,
+        );
+        let path = file.path().to_str().unwrap();
+        let reference = reference.path().to_str().unwrap();
+
+        let mut source = open_source(path, Some(reference)).expect("Failed to open CRAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.seq(), original);
+        assert_eq!(record.qual(), Some(b"JIHGFEDCBA".as_slice()));
+    }
+
+    #[test]
+    fn test_cram_skips_secondary_and_supplementary() {
+        use noodles_sam::alignment::record::Flags;
+
+        // noodles-cram cannot round-trip records without qualities (its writer
+        // emits a broken external block reference), so the fixtures used for
+        // reading tests always carry qualities.
+        let quality = Some(b"IIIIIIIIII".as_slice());
+        let (file, reference) = create_temp_cram(
+            vec![
+                cram_record("primary", Flags::empty(), b"ACGTACGTAC", quality, 1),
+                cram_record("secondary", Flags::SECONDARY, b"ACGTACGTAC", quality, 1),
+                cram_record(
+                    "supplementary",
+                    Flags::SUPPLEMENTARY,
+                    b"ACGTACGTAC",
+                    quality,
+                    1,
+                ),
+            ],
+            CRAM_REFERENCE,
+        );
+        let path = file.path().to_str().unwrap();
+        let reference = reference.path().to_str().unwrap();
+
+        let mut source = open_source(path, Some(reference)).expect("Failed to open CRAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected the primary record");
+
+        assert_eq!(record.id(), "primary");
+        assert!(source.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cram_without_reference_is_a_clear_error() {
+        let (file, _reference) = create_temp_cram(
+            vec![cram_record(
+                "read1",
+                Default::default(),
+                b"ACGTACGTAC",
+                None,
+                1,
+            )],
+            CRAM_REFERENCE,
+        );
+        let path = file.path().to_str().unwrap();
+
+        let error = match open_source(path, None) {
+            Ok(_) => panic!("CRAM without a reference must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            format!("{error}").contains("requires a reference"),
+            "Unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1172,7 +1571,7 @@ mod tests {
         let temp_file = create_temp_fastq(&large_content);
         let path = temp_file.path().to_str().unwrap();
 
-        let mut source = open_source(path).expect("Failed to open source");
+        let mut source = open_source(path, None).expect("Failed to open source");
 
         let mut count = 0;
         while source.next_record().unwrap().is_some() {
