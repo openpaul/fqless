@@ -22,6 +22,14 @@ pub trait RecordSource {
 /// and CRAM are detected here as well once they are implemented.
 pub fn open_source(path: &str) -> Result<Box<dyn RecordSource>> {
     let mut input = InputReader::new(path)?;
+
+    // BAM is binary, so check its magic first; the stream is already
+    // decompressed, which is why this works for BGZF and plain BAM alike.
+    let is_bam = input.peek(4)?.starts_with(b"BAM\x01");
+    if is_bam {
+        return Ok(Box::new(BamSource::new(input.into_inner())?));
+    }
+
     let is_fasta = {
         let prefix = input.peek(4096)?;
         // A UTF-8 BOM is legal at the start of a text file.
@@ -415,6 +423,109 @@ impl RecordSource for SamSource {
     }
 }
 
+/// BAM parser built on `noodles`.
+///
+/// BAM stores the same data as SAM, so the same rules apply: only QNAME, FLAG,
+/// SEQ and QUAL are used, secondary and supplementary alignments are skipped,
+/// and reverse-strand reads are flipped back to their original orientation.
+/// Missing qualities (all `0xFF` in BAM) become `qual: None`.
+pub struct BamSource {
+    reader: noodles_bam::io::Reader<Box<dyn BufRead>>,
+    scratch: noodles_bam::Record,
+    record: Record,
+    qual_buf: Vec<u8>,
+    done: bool,
+}
+
+impl BamSource {
+    pub fn new(inner: Box<dyn BufRead>) -> Result<Self> {
+        let mut reader = noodles_bam::io::Reader::from(inner);
+        reader
+            .read_header()
+            .context("Failed to read the BAM header")?;
+
+        Ok(Self {
+            reader,
+            scratch: noodles_bam::Record::default(),
+            record: Record::new(),
+            qual_buf: Vec::new(),
+            done: false,
+        })
+    }
+}
+
+impl RecordSource for BamSource {
+    fn next_record(&mut self) -> Result<Option<&Record>> {
+        if self.done {
+            return Ok(None);
+        }
+
+        loop {
+            let block_size = self
+                .reader
+                .read_record(&mut self.scratch)
+                .context("Failed to read a BAM record")?;
+            if block_size == 0 {
+                self.done = true;
+                return Ok(None);
+            }
+
+            let flags = self.scratch.flags();
+            if flags.is_secondary() || flags.is_supplementary() {
+                continue;
+            }
+
+            let sequence = self.scratch.sequence();
+            if sequence.is_empty() {
+                // An alignment without a sequence carries no read.
+                continue;
+            }
+
+            let name = self
+                .scratch
+                .name()
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+                .unwrap_or_default();
+            self.record.set_name(&name, None);
+
+            // BAM packs bases four to a byte and uses '=' for a base that
+            // matches the reference. The reference is not available here, so
+            // '=' becomes 'N' rather than leaking a non-alphabet character
+            // into the statistics and translation views.
+            let seq = self.record.seq_mut();
+            seq.clear();
+            seq.extend(
+                sequence
+                    .iter()
+                    .map(|base| if base == b'=' { b'N' } else { base }),
+            );
+
+            // BAM stores raw Phred scores; FASTQ-style ASCII is score + 33.
+            let quality_scores = self.scratch.quality_scores();
+            if quality_scores.is_empty() {
+                self.record.set_qual(None);
+            } else {
+                self.qual_buf.clear();
+                self.qual_buf
+                    .extend(quality_scores.iter().map(|score| score.saturating_add(33)));
+                self.record.set_qual(Some(&self.qual_buf));
+            }
+
+            if flags.is_reverse_complemented() {
+                let revcomp = dna::revcomp(self.record.seq());
+                let seq = self.record.seq_mut();
+                seq.clear();
+                seq.extend_from_slice(&revcomp);
+                if let Some(qual) = self.record.qual_mut() {
+                    qual.reverse();
+                }
+            }
+
+            return Ok(Some(&self.record));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +541,61 @@ mod tests {
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
         file.write_all(content.as_bytes())
             .expect("Failed to write to temp file");
+        file.flush().expect("Failed to flush temp file");
+        file
+    }
+
+    /// Build one BAM record. `qual` is FASTQ-style ASCII, like the viewer sees.
+    fn bam_record(
+        name: &str,
+        flags: noodles_sam::alignment::record::Flags,
+        seq: &[u8],
+        qual: Option<&[u8]>,
+    ) -> noodles_sam::alignment::RecordBuf {
+        use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
+
+        let builder = noodles_sam::alignment::RecordBuf::builder()
+            .set_name(name)
+            .set_flags(flags)
+            .set_sequence(Sequence::from(seq.to_vec()));
+
+        let builder = match qual {
+            Some(qual) => builder.set_quality_scores(QualityScores::from(
+                qual.iter().map(|score| score - 33).collect::<Vec<_>>(),
+            )),
+            None => builder,
+        };
+
+        builder.build()
+    }
+
+    /// Write records to a temporary BGZF-compressed BAM file.
+    fn create_temp_bam(records: Vec<noodles_sam::alignment::RecordBuf>) -> NamedTempFile {
+        use noodles_sam::{
+            self as sam,
+            header::record::value::{map::ReferenceSequence, Map},
+        };
+        use std::num::NonZeroUsize;
+
+        let reference = Map::<ReferenceSequence>::new(NonZeroUsize::new(1000).unwrap());
+        let header = sam::Header::builder()
+            .add_reference_sequence("chr1", reference)
+            .build();
+
+        let mut writer = noodles_bam::io::Writer::new(Vec::new());
+        writer
+            .write_header(&header)
+            .expect("Failed to write header");
+
+        for record in &records {
+            sam::alignment::io::Write::write_alignment_record(&mut writer, &header, record)
+                .expect("Failed to write record");
+        }
+        writer.try_finish().expect("Failed to finish BAM");
+
+        let mut file = NamedTempFile::new().expect("Failed to create temp file");
+        file.write_all(writer.get_ref().get_ref())
+            .expect("Failed to write BAM");
         file.flush().expect("Failed to flush temp file");
         file
     }
@@ -871,6 +1037,100 @@ mod tests {
             format!("{error}").contains("SAM line 3"),
             "Unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn test_open_source_bam() {
+        use noodles_sam::alignment::record::Flags;
+
+        let file = create_temp_bam(vec![
+            bam_record("read1", Flags::empty(), b"ACGT", Some(b"IIII")),
+            bam_record("read2", Flags::empty(), b"GGG", Some(b"###")),
+        ]);
+        let path = file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open BAM");
+
+        let first = source
+            .next_record()
+            .expect("Failed to read first record")
+            .expect("Expected a first record");
+        assert_eq!(first.id(), "read1");
+        assert_eq!(first.seq(), b"ACGT");
+        assert_eq!(first.qual(), Some(b"IIII".as_slice()));
+
+        let second = source
+            .next_record()
+            .expect("Failed to read second record")
+            .expect("Expected a second record");
+        assert_eq!(second.id(), "read2");
+        assert_eq!(second.seq(), b"GGG");
+        assert_eq!(second.qual(), Some(b"###".as_slice()));
+
+        assert!(source.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_bam_skips_secondary_and_supplementary() {
+        use noodles_sam::alignment::record::Flags;
+
+        let file = create_temp_bam(vec![
+            bam_record("primary", Flags::empty(), b"ACGT", Some(b"IIII")),
+            bam_record("secondary", Flags::SECONDARY, b"ACGT", Some(b"IIII")),
+            bam_record("supplementary", Flags::SUPPLEMENTARY, b"AC", Some(b"II")),
+        ]);
+        let path = file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open BAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected the primary record");
+
+        assert_eq!(record.id(), "primary");
+        assert!(source.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_bam_reverse_strand_restores_original_orientation() {
+        use noodles_sam::alignment::record::Flags;
+
+        let original = b"ACGTACGTTT";
+        let stored = dna::revcomp(original);
+        let file = create_temp_bam(vec![bam_record(
+            "rev",
+            Flags::REVERSE_COMPLEMENTED,
+            &stored,
+            Some(b"ABCDEFGHIJ"),
+        )]);
+        let path = file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open BAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.seq(), original);
+        assert_eq!(record.qual(), Some(b"JIHGFEDCBA".as_slice()));
+    }
+
+    #[test]
+    fn test_bam_missing_quality_is_none() {
+        use noodles_sam::alignment::record::Flags;
+
+        let file = create_temp_bam(vec![bam_record("noqual", Flags::empty(), b"ACGT", None)]);
+        let path = file.path().to_str().unwrap();
+
+        let mut source = open_source(path).expect("Failed to open BAM");
+        let record = source
+            .next_record()
+            .expect("Failed to read record")
+            .expect("Expected one record");
+
+        assert_eq!(record.seq(), b"ACGT");
+        assert_eq!(record.qual(), None);
+        assert!(!record.has_quality());
     }
 
     #[test]

@@ -16,6 +16,9 @@ aho-corasick = "1.1"
 num-format = "0.4.4"
 signal-hook = "0.3.18"
 nix = { version = "0.30", features = ["poll"] }
+noodles-bam = "0.98.0"
+noodles-bgzf = "0.52.0"
+noodles-sam = "0.93.0"
 
 [dev-dependencies]
 tempfile = "3.13"
