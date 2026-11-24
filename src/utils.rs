@@ -19,24 +19,22 @@ impl PhredRange {
         }
     }
 
-    pub fn all() -> &'static [Self] {
-        &[
-            Self::Solexa,
-            Self::Illumina1_3,
-            Self::Illumina1_5,
-            Self::Default,
-        ]
-    }
-
+    /// Guess the encoding from the lowest and highest quality characters.
+    ///
+    /// Phred+33 is the default: anything below `;` (59) can only be Phred+33,
+    /// and high-quality Phred+33 data (e.g. all `I`) never goes above `K` (75),
+    /// while Phred+64 data with every base at Q11 or less is implausible. Only
+    /// characters above `K` that never dip below `;` indicate a +64 encoding.
+    /// An input without qualities (`min > max`) falls back to Phred+33.
     pub fn from_min_max(min: u8, max: u8) -> Self {
-        for variant in Self::all() {
-            if let Some((rmin, rmax)) = variant.range() {
-                if min >= rmin && max <= rmax {
-                    return *variant;
-                }
-            }
+        const PHRED33_MAX: u8 = b'K';
+        if min > max || min < 59 || max <= PHRED33_MAX {
+            Self::Default
+        } else if min < 64 {
+            Self::Solexa
+        } else {
+            Self::Illumina1_3
         }
-        Self::Default
     }
 
     pub fn base_phred(&self) -> u8 {
@@ -51,8 +49,8 @@ impl PhredRange {
         match self {
             Self::Solexa => "Solexa",
             Self::Illumina1_3 => "Illumina 1.3",
-            Self::Illumina1_5 => "Illumina 1.8",
-            Self::Default => "Default",
+            Self::Illumina1_5 => "Illumina 1.5",
+            Self::Default => "Phred+33",
         }
     }
 }
@@ -325,6 +323,17 @@ mod tests {
         // Test Illumina 1.3+ range (64-126) - needs higher max to distinguish from Solexa
         let range = PhredRange::from_min_max(64, 110);
         assert_eq!(range, PhredRange::Illumina1_3);
+
+        // High-quality Phred+33 data stays Phred+33 even though every
+        // character also fits the +64 ranges.
+        assert_eq!(PhredRange::from_min_max(b'I', b'I'), PhredRange::Default);
+        assert_eq!(PhredRange::from_min_max(b'<', b'K'), PhredRange::Default);
+
+        // No qualities at all (min/max never updated)
+        assert_eq!(
+            PhredRange::from_min_max(u8::MAX, u8::MIN),
+            PhredRange::Default
+        );
     }
 
     #[test]
@@ -332,7 +341,7 @@ mod tests {
         let default_range = PhredRange::Default;
         assert_eq!(default_range.base_phred(), 33);
         assert_eq!(default_range.top_phred(), 126);
-        assert_eq!(default_range.name(), "Default");
+        assert_eq!(default_range.name(), "Phred+33");
     }
 
     #[test]
