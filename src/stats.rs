@@ -2,7 +2,7 @@
 //!
 //! [`StatsAccumulator`] is fed one record at a time by a background scan (or,
 //! for stdin, by the main thread as reads are loaded) and turned into a
-//! [`FastqStats`] snapshot for drawing.
+//! [`ReadStats`] snapshot for drawing.
 
 use crate::adapter::{AdapterDetector, AdapterStats};
 use crate::record::Record;
@@ -22,7 +22,7 @@ fn average_quality_bin(avg_qual: f64) -> usize {
 }
 
 #[derive(Debug, Clone)]
-pub struct FastqStats {
+pub struct ReadStats {
     pub processed_reads: u64,
     pub avg_length: f64,
     pub min_length: usize,
@@ -45,7 +45,7 @@ pub struct FastqStats {
     pub quality_available: bool,
 }
 
-impl Default for FastqStats {
+impl Default for ReadStats {
     fn default() -> Self {
         Self {
             processed_reads: 0,
@@ -64,7 +64,7 @@ impl Default for FastqStats {
     }
 }
 
-/// Running totals for [`FastqStats`].
+/// Running totals for [`ReadStats`].
 ///
 /// The per-base work is the hot loop of the stats scan, so it is kept free
 /// of data dependencies: quality characters are counted raw in four
@@ -181,7 +181,7 @@ impl StatsAccumulator {
     }
 
     /// Write the current totals into `stats`, reusing its buffers.
-    pub fn snapshot_into(&self, stats: &mut FastqStats, scanned_all: bool) {
+    pub fn snapshot_into(&self, stats: &mut ReadStats, scanned_all: bool) {
         let percent = |count: u64| {
             if self.total_length > 0 {
                 count as f64 / self.total_length as f64 * 100.0
@@ -234,8 +234,8 @@ impl StatsAccumulator {
     }
 
     #[cfg(test)]
-    pub fn snapshot(&self, scanned_all: bool) -> FastqStats {
-        let mut stats = FastqStats::default();
+    pub fn snapshot(&self, scanned_all: bool) -> ReadStats {
+        let mut stats = ReadStats::default();
         self.snapshot_into(&mut stats, scanned_all);
         stats
     }

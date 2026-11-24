@@ -3,7 +3,7 @@ use crate::color::ColorScheme;
 use crate::reader::{open_source, RecordSource};
 use crate::record::Record;
 use crate::search::{MatchScratch, Pattern, SearchIndex, SearchScope};
-use crate::stats::{FastqStats, StatsAccumulator, AVG_QUAL_BIN_WIDTH, AVG_QUAL_NUM_BINS};
+use crate::stats::{ReadStats, StatsAccumulator, AVG_QUAL_BIN_WIDTH, AVG_QUAL_NUM_BINS};
 use crate::utils::{
     calculate_record_lines, determine_min_max_phred, translate_frames,
     translate_frames_with_quality, PhredRange, ReadOrientation,
@@ -99,7 +99,7 @@ struct Mate {
     total_reads: Arc<AtomicU64>,
     count_done: Arc<AtomicBool>,
     counter: Worker,
-    stats: Arc<Mutex<FastqStats>>,
+    stats: Arc<Mutex<ReadStats>>,
     stats_worker: Worker,
     /// Stdin statistics, accumulated on the main thread from loaded reads.
     stdin_stats: Option<StatsAccumulator>,
@@ -119,7 +119,7 @@ impl Mate {
             total_reads: Arc::new(AtomicU64::new(0)),
             count_done: Arc::new(AtomicBool::new(false)),
             counter: Worker::default(),
-            stats: Arc::new(Mutex::new(FastqStats::default())),
+            stats: Arc::new(Mutex::new(ReadStats::default())),
             stats_worker: Worker::default(),
             stdin_stats: None,
             search_index: Arc::new(Mutex::new(SearchIndex::new())),
@@ -166,7 +166,7 @@ impl Mate {
     /// Start computing statistics from scratch with `phred_range`.
     fn start_stats(&mut self, phred_range: PhredRange) {
         self.stats_worker.stop();
-        *self.stats.lock().unwrap() = FastqStats::default();
+        *self.stats.lock().unwrap() = ReadStats::default();
         if self.is_stdin() {
             self.stdin_stats = Some(StatsAccumulator::new(phred_range));
             self.update_stdin_stats();
@@ -301,7 +301,7 @@ fn count_reads(
 fn scan_stats(
     input: &Input,
     phred_range: PhredRange,
-    stats: &Mutex<FastqStats>,
+    stats: &Mutex<ReadStats>,
     stop: &AtomicBool,
 ) -> Result<()> {
     let mut reader = input.open()?;
@@ -399,7 +399,7 @@ fn no_quality_message(title: &'static str) -> Paragraph<'static> {
 }
 
 /// Create quality histogram bar chart
-fn create_quality_histogram<'a>(stats: &FastqStats, color_scheme: &ColorScheme) -> BarChart<'a> {
+fn create_quality_histogram<'a>(stats: &ReadStats, color_scheme: &ColorScheme) -> BarChart<'a> {
     let bin_width = 5;
     let bars: Vec<Bar> = (0..=40)
         .step_by(bin_width)
@@ -428,7 +428,7 @@ fn create_quality_histogram<'a>(stats: &FastqStats, color_scheme: &ColorScheme) 
 }
 /// Create average read quality histogram bar chart
 fn create_average_read_quality_histogram<'a>(
-    stats: &FastqStats,
+    stats: &ReadStats,
     color_scheme: &ColorScheme,
 ) -> BarChart<'a> {
     let bars: Vec<Bar> = stats
@@ -463,7 +463,7 @@ fn create_average_read_quality_histogram<'a>(
 }
 
 fn create_position_quality_chart<'a>(
-    stats: &FastqStats,
+    stats: &ReadStats,
     color_scheme: &ColorScheme,
 ) -> BarChart<'a> {
     let display_positions = stats.position_quality.len().min(50);
@@ -535,7 +535,7 @@ where
 }
 
 /// Create adapter statistics display
-fn create_adapter_stats_display(stats: &FastqStats) -> Paragraph<'_> {
+fn create_adapter_stats_display(stats: &ReadStats) -> Paragraph<'_> {
     let adapter_stats = &stats.adapter_stats;
 
     let contamination_rate = if stats.processed_reads > 0 {
@@ -2309,7 +2309,7 @@ mod bench {
         report("count", start, &path);
 
         let start = Instant::now();
-        let stats = Mutex::new(FastqStats::default());
+        let stats = Mutex::new(ReadStats::default());
         scan_stats(&input, PhredRange::Default, &stats, &stop).unwrap();
         report("stats", start, &path);
 
