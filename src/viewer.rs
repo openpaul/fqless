@@ -286,6 +286,12 @@ fn create_position_quality_chart<'a>(
         .bar_gap(1)
 }
 
+/// Quality character at `pos`, or the lowest score when the record has no
+/// quality for that base.
+fn quality_at(quality: &[u8], pos: usize) -> u8 {
+    quality.get(pos).copied().unwrap_or(0)
+}
+
 /// Get color style based on quality score
 fn quality_score_style(quality: u8, color_scheme: &ColorScheme) -> Style {
     Style::default().fg(color_scheme.quality_to_color(quality))
@@ -1531,6 +1537,9 @@ impl TuiViewer {
         }
     }
 
+    /// Colour bases by quality. A malformed record whose quality string is
+    /// shorter than its sequence is shown rather than crashing the viewer:
+    /// bases without a quality are drawn as Q0.
     fn colorize_sequence<'a>(&self, sequence: &[u8], quality: &[u8]) -> Vec<Span<'a>> {
         let ranges = self
             .highlight_pattern()
@@ -1540,7 +1549,7 @@ impl TuiViewer {
         let mut pos = 0;
         for (start, end) in &ranges {
             for (i, &base) in sequence[pos..*start].iter().enumerate() {
-                spans.push(self.base_span(base, quality[pos + i], false));
+                spans.push(self.base_span(base, quality_at(quality, pos + i), false));
             }
             for &base in &sequence[*start..*end] {
                 spans.push(self.base_span(base, 0, true));
@@ -1548,7 +1557,7 @@ impl TuiViewer {
             pos = *end;
         }
         for (i, &base) in sequence[pos..].iter().enumerate() {
-            spans.push(self.base_span(base, quality[pos + i], false));
+            spans.push(self.base_span(base, quality_at(quality, pos + i), false));
         }
         spans
     }
@@ -2118,7 +2127,15 @@ impl TuiViewer {
         };
 
         let search_status = if self.search_pattern.is_some() {
-            let count = self.search_index.lock().unwrap().count();
+            // In paired mode n/N walk the union of R1 and R2 matches, so the
+            // total has to count a pair once even when both mates match.
+            let count = if self.is_paired {
+                let index = self.search_index.lock().unwrap();
+                let index_r2 = self.search_index_r2.lock().unwrap();
+                index.count_union_up_to(&index_r2, u64::MAX)
+            } else {
+                self.search_index.lock().unwrap().count()
+            };
             let mode = match &self.search_pattern {
                 Some(p) if p.is_peptide() => "aa",
                 Some(_) => {
@@ -2135,15 +2152,16 @@ impl TuiViewer {
                 SearchScope::Id => "name ",
                 SearchScope::SequenceAndId => "seq+name ",
             };
-            let scanning = if self.search_worker_done.load(Ordering::SeqCst) {
+            let mut done = self.search_worker_done.load(Ordering::SeqCst);
+            let mut scanned = self.search_worker_scanned.load(Ordering::SeqCst);
+            if self.is_paired {
+                done &= self.search_worker_done_r2.load(Ordering::SeqCst);
+                scanned = scanned.min(self.search_worker_scanned_r2.load(Ordering::SeqCst));
+            }
+            let scanning = if done {
                 String::new()
             } else {
-                format!(
-                    " scanning…({})",
-                    self.search_worker_scanned
-                        .load(Ordering::SeqCst)
-                        .to_formatted_string(&Locale::en)
-                )
+                format!(" scanning…({})", scanned.to_formatted_string(&Locale::en))
             };
             format!(
                 " | /{} {}{} {}/{}{}",
