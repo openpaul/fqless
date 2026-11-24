@@ -630,8 +630,9 @@ impl TuiViewer {
         let buffer_r2 = if is_paired {
             DisplayBuffer::new(&file_path_2)?
         } else {
-            // Dummy buffer — not used when is_paired is false
-            DisplayBuffer::new(&file_path)?
+            // Not used when is_paired is false. Opening `file_path` again here
+            // would take a second lock on stdin for piped input and hang.
+            DisplayBuffer::empty()
         };
 
         let mut viewer = TuiViewer {

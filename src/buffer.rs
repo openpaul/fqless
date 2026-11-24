@@ -32,6 +32,18 @@ impl DisplayBuffer {
             fully_loaded,
         })
     }
+    /// A buffer with no input. Used as the R2 placeholder in single-file mode
+    /// so the input (which may be stdin) is not opened a second time.
+    pub fn empty() -> Self {
+        let input: Box<dyn BufRead> = Box::new(std::io::empty());
+        DisplayBuffer {
+            records: fastq::Reader::new(input).records(),
+            reads: Arc::new(RwLock::new(Vec::new())),
+            buffer_end: 0,
+            fully_loaded: true,
+        }
+    }
+
     pub fn load_window(&mut self, position: u64, n: usize) -> Result<()> {
         while self.buffer_end < position + n as u64 {
             if let Some(record) = self.records.next() {
