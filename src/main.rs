@@ -4,8 +4,10 @@ mod buffer;
 mod color;
 mod reader;
 mod search;
+mod stats;
 mod utils;
 mod viewer;
+mod worker;
 use app::run;
 use std::env;
 

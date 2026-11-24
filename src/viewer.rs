@@ -1,12 +1,13 @@
-use crate::adapter::{AdapterDetector, AdapterStats};
 use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
 use crate::reader::{FastqReader, RecordReader};
 use crate::search::{MatchScratch, Pattern, SearchIndex, SearchScope};
+use crate::stats::{FastqStats, StatsAccumulator, AVG_QUAL_BIN_WIDTH, AVG_QUAL_NUM_BINS};
 use crate::utils::{
     calculate_record_lines, determine_min_max_phred, translate_frames,
     translate_frames_with_quality, PhredRange, ReadOrientation,
 };
+use crate::worker::Worker;
 use anyhow::Result;
 use bio::alphabets::dna;
 use bio::io::fastq;
@@ -24,16 +25,16 @@ use ratatui::{
 
 use signal_hook::consts::SIGINT;
 use signal_hook::flag;
-use std::io::stdin;
+use std::cmp::min;
+use std::io::{stdin, BufRead};
 use std::os::unix::io::AsRawFd;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
-use std::{cmp::min, sync::RwLock};
 use std::{fs::File, io::stdout};
 use std::{io::Write, os::fd::BorrowedFd};
 use termion::{
@@ -47,64 +48,10 @@ use termion::{
 const BUFFER_WINDOW_SIZE: usize = 1000;
 const PAGE_SCROLL_AMOUNT: usize = 10;
 
-// Bins for the average-quality-per-read histogram: width 5, capped at Q40.
-// The stats worker increments these bins directly instead of keeping one
-// value per read, which would grow unboundedly for large files.
-const AVG_QUAL_BIN_WIDTH: usize = 5;
-const AVG_QUAL_MAX: usize = 40;
-const AVG_QUAL_NUM_BINS: usize = (AVG_QUAL_MAX / AVG_QUAL_BIN_WIDTH) + 1;
-
-/// Bin index in the average-quality histogram for a per-read average quality.
-fn average_quality_bin(avg_qual: f64) -> usize {
-    let idx = (avg_qual.max(0.0) as usize) / AVG_QUAL_BIN_WIDTH;
-    idx.min(AVG_QUAL_NUM_BINS - 1)
-}
-
-#[derive(Debug, Clone)]
-pub struct FastqStats {
-    pub total_reads: u64,
-    pub processed_reads: u64,
-    pub avg_length: f64,
-    pub min_length: usize,
-    pub max_length: usize,
-    pub quality_histogram: Vec<u64>, // Histogram of individual base quality scores (0-93)
-    pub position_quality: Vec<f64>,  // Average quality at each position
-    pub gc_content: f64,
-    pub n_content: f64,
-    pub scanned_all: bool,
-    /// Histogram of per-read average quality scores, binned with
-    /// [`AVG_QUAL_BIN_WIDTH`]. One entry per bin, so its size is
-    /// independent of the number of reads.
-    pub average_read_quality_histogram: Vec<u64>,
-    pub adapter_stats: AdapterStats, // Adapter contamination statistics
-}
-
-impl Default for FastqStats {
-    fn default() -> Self {
-        Self {
-            total_reads: 0,
-            processed_reads: 0,
-            avg_length: 0.0,
-            min_length: usize::MAX,
-            max_length: 0,
-            quality_histogram: vec![0; 94], // Quality scores 0-93
-            position_quality: Vec::new(),
-            gc_content: 0.0,
-            n_content: 0.0,
-            scanned_all: false,
-            average_read_quality_histogram: vec![0; AVG_QUAL_NUM_BINS],
-            adapter_stats: AdapterStats::default(),
-        }
-    }
-}
-
 pub struct TuiViewer {
     terminal: Terminal<TermionBackend<AlternateScreen<RawTerminal<std::io::Stdout>>>>,
-    buffer: DisplayBuffer,
-    buffer_r2: DisplayBuffer,
-    file_path: String,
-    file_path_r2: String,
-    is_paired: bool,
+    /// One entry per input file: R1, plus R2 in paired mode.
+    mates: Vec<Mate>,
     current_position: u64,
     horizontal_offset: usize,
     no_wrap: bool,
@@ -117,12 +64,6 @@ pub struct TuiViewer {
     stats_tab: usize,
     help_scroll: usize,
     phred_range: PhredRange,
-    stats: Arc<Mutex<FastqStats>>,
-    stats_worker_handle: Option<JoinHandle<()>>,
-    stats_stop_flag: Arc<AtomicBool>,
-    stats_r2: Arc<Mutex<FastqStats>>,
-    stats_worker_handle_r2: Option<JoinHandle<()>>,
-    stats_stop_flag_r2: Arc<AtomicBool>,
     color_scheme: ColorScheme,
     search_mode: bool,
     search_input: String,
@@ -134,20 +75,268 @@ pub struct TuiViewer {
     /// True when the scope was chosen automatically because the query looks
     /// like a read name rather than a nucleotide sequence.
     search_scope_auto: bool,
+    /// 1-based number of the current match among all matches.
+    search_match_k: u64,
+}
+
+#[derive(Clone, Copy)]
+enum MatchDirection {
+    AtOrAfter,
+    Before,
+}
+
+/// How often background scans publish their progress.
+const COUNT_PROGRESS_EVERY: u64 = 100_000;
+const STATS_PROGRESS_EVERY: u64 = 100_000;
+const SEARCH_PROGRESS_EVERY: u64 = 10_000;
+
+/// Everything that belongs to one input file: R1, or R2 in paired mode.
+struct Mate {
+    path: String,
+    buffer: DisplayBuffer,
+    /// Number of reads in the file, from a fast background count. Stdin
+    /// cannot be read twice, so for stdin only loaded reads are known.
+    total_reads: Arc<AtomicU64>,
+    count_done: Arc<AtomicBool>,
+    counter: Worker,
+    stats: Arc<Mutex<FastqStats>>,
+    stats_worker: Worker,
+    /// Stdin statistics, accumulated on the main thread from loaded reads.
+    stdin_stats: Option<StatsAccumulator>,
     search_index: Arc<Mutex<SearchIndex>>,
     search_indexed_up_to: u64,
-    search_match_k: u64,
-    search_worker_handle: Option<JoinHandle<()>>,
-    search_stop_flag: Arc<AtomicBool>,
-    search_worker_scanned: Arc<AtomicU64>,
-    search_worker_done: Arc<AtomicBool>,
-    search_index_r2: Arc<Mutex<SearchIndex>>,
-    search_indexed_up_to_r2: u64,
-    search_match_k_r2: u64,
-    search_worker_handle_r2: Option<JoinHandle<()>>,
-    search_stop_flag_r2: Arc<AtomicBool>,
-    search_worker_scanned_r2: Arc<AtomicU64>,
-    search_worker_done_r2: Arc<AtomicBool>,
+    search_worker: Worker,
+    search_scanned: Arc<AtomicU64>,
+    search_done: Arc<AtomicBool>,
+}
+
+impl Mate {
+    fn open(path: String) -> Result<Self> {
+        let buffer = DisplayBuffer::new(&path)?;
+        Ok(Self {
+            path,
+            buffer,
+            total_reads: Arc::new(AtomicU64::new(0)),
+            count_done: Arc::new(AtomicBool::new(false)),
+            counter: Worker::default(),
+            stats: Arc::new(Mutex::new(FastqStats::default())),
+            stats_worker: Worker::default(),
+            stdin_stats: None,
+            search_index: Arc::new(Mutex::new(SearchIndex::new())),
+            search_indexed_up_to: 0,
+            search_worker: Worker::default(),
+            search_scanned: Arc::new(AtomicU64::new(0)),
+            search_done: Arc::new(AtomicBool::new(true)),
+        })
+    }
+
+    fn is_stdin(&self) -> bool {
+        self.path == "-"
+    }
+
+    fn reads_loaded(&self) -> u64 {
+        self.buffer.reads.read().unwrap().len() as u64
+    }
+
+    /// Reads in the input and whether that number is final. For stdin it is
+    /// the number loaded so far until the end of the input has been reached.
+    fn total_reads(&self) -> (u64, bool) {
+        if self.is_stdin() {
+            (self.reads_loaded(), self.buffer.is_fully_loaded())
+        } else {
+            (
+                self.total_reads.load(Ordering::Relaxed),
+                self.count_done.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    /// Count the reads of a file in the background. Counting does not depend
+    /// on any view setting, so this runs once.
+    fn start_counter(&mut self) {
+        if self.is_stdin() {
+            return;
+        }
+        let path = self.path.clone();
+        let total = Arc::clone(&self.total_reads);
+        let done = Arc::clone(&self.count_done);
+        self.counter = Worker::spawn(move |stop| count_reads(&path, &total, &done, stop));
+    }
+
+    /// Start computing statistics from scratch with `phred_range`.
+    fn start_stats(&mut self, phred_range: PhredRange) {
+        self.stats_worker.stop();
+        *self.stats.lock().unwrap() = FastqStats::default();
+        if self.is_stdin() {
+            self.stdin_stats = Some(StatsAccumulator::new(phred_range));
+            self.update_stdin_stats();
+            return;
+        }
+        let path = self.path.clone();
+        let stats = Arc::clone(&self.stats);
+        self.stats_worker = Worker::spawn(move |stop| scan_stats(&path, phred_range, &stats, stop));
+    }
+
+    /// Add reads loaded from stdin since the last call to its statistics.
+    /// Only the new reads are visited, so this is cheap to call every frame.
+    fn update_stdin_stats(&mut self) {
+        let Some(acc) = self.stdin_stats.as_mut() else {
+            return;
+        };
+        let reads = self.buffer.reads.read().unwrap();
+        let seen = acc.reads() as usize;
+        let complete = self.buffer.is_fully_loaded();
+        if seen == reads.len() && self.stats.lock().unwrap().scanned_all == complete {
+            return;
+        }
+        for record in &reads[seen..] {
+            acc.add(record);
+        }
+        acc.snapshot_into(&mut self.stats.lock().unwrap(), complete);
+    }
+
+    fn reset_search(&mut self) {
+        // Stop the worker before clearing the index; otherwise it can set
+        // bits from the old pattern/scope after the reset.
+        self.search_worker.stop();
+        self.search_index.lock().unwrap().reset();
+        self.search_indexed_up_to = 0;
+        self.search_done.store(true, Ordering::SeqCst);
+        self.search_scanned.store(0, Ordering::SeqCst);
+    }
+
+    /// Mark matches among the reads loaded since the last call.
+    fn index_loaded(&mut self, pattern: Option<&Pattern>, scope: SearchScope) {
+        let reads = self.buffer.reads.read().unwrap();
+        let len = reads.len() as u64;
+        if let Some(pattern) = pattern {
+            let mut index = self.search_index.lock().unwrap();
+            let mut scratch = MatchScratch::new();
+            for record_idx in self.search_indexed_up_to..len {
+                if scope.matches_with(pattern, &reads[record_idx as usize], &mut scratch) {
+                    index.set(record_idx);
+                }
+            }
+        }
+        self.search_indexed_up_to = len;
+    }
+
+    /// Start the look-ahead search over the whole file. Skipped for stdin,
+    /// which cannot be re-read; its loaded reads are indexed by
+    /// [`Mate::index_loaded`].
+    fn start_search(&mut self, pattern: &Pattern, scope: SearchScope) {
+        self.search_worker.stop();
+        if self.is_stdin() {
+            self.search_done.store(true, Ordering::SeqCst);
+            return;
+        }
+        self.search_done.store(false, Ordering::SeqCst);
+        self.search_scanned.store(0, Ordering::SeqCst);
+
+        let path = self.path.clone();
+        let pattern = pattern.clone();
+        let index = Arc::clone(&self.search_index);
+        let scanned = Arc::clone(&self.search_scanned);
+        let done = Arc::clone(&self.search_done);
+        self.search_worker = Worker::spawn(move |stop| {
+            scan_search(&path, &pattern, scope, &index, &scanned, &done, stop)
+        });
+    }
+
+    /// True while any background scan of this file is still running.
+    fn is_busy(&self) -> bool {
+        self.counter.is_running()
+            || self.stats_worker.is_running()
+            || self.search_worker.is_running()
+    }
+
+    fn worker_error(&self) -> Option<String> {
+        self.counter
+            .error()
+            .or_else(|| self.stats_worker.error())
+            .or_else(|| self.search_worker.error())
+    }
+}
+
+fn open_records(path: &str) -> Result<RecordReader<impl BufRead>> {
+    Ok(RecordReader::new(
+        FastqReader::new(path)?.into_fastq_reader(),
+    ))
+}
+
+/// Count the reads of `path`, publishing the running total.
+fn count_reads(path: &str, total: &AtomicU64, done: &AtomicBool, stop: &AtomicBool) -> Result<()> {
+    let mut reader = open_records(path)?;
+    let mut count = 0u64;
+    while reader.next_record()?.is_some() {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        count += 1;
+        if count.is_multiple_of(COUNT_PROGRESS_EVERY) {
+            total.store(count, Ordering::Relaxed);
+        }
+    }
+    total.store(count, Ordering::Relaxed);
+    done.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Compute statistics over the whole file, publishing a snapshot every
+/// [`STATS_PROGRESS_EVERY`] reads and once at the end.
+fn scan_stats(
+    path: &str,
+    phred_range: PhredRange,
+    stats: &Mutex<FastqStats>,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let mut reader = open_records(path)?;
+    let mut acc = StatsAccumulator::new(phred_range);
+    while let Some(record) = reader.next_record()? {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        acc.add(record);
+        if acc.reads().is_multiple_of(STATS_PROGRESS_EVERY) {
+            acc.snapshot_into(&mut stats.lock().unwrap(), false);
+        }
+    }
+    if !stop.load(Ordering::Relaxed) {
+        acc.snapshot_into(&mut stats.lock().unwrap(), true);
+    }
+    Ok(())
+}
+
+/// Stream the file once, setting index bits for every record containing a
+/// match. This provides look-ahead past the loaded buffer without storing
+/// anything but the one-bit-per-record index.
+fn scan_search(
+    path: &str,
+    pattern: &Pattern,
+    scope: SearchScope,
+    index: &Mutex<SearchIndex>,
+    scanned: &AtomicU64,
+    done: &AtomicBool,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let mut reader = open_records(path)?;
+    let mut record_idx = 0u64;
+    let mut scratch = MatchScratch::new();
+    while let Some(record) = reader.next_record()? {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if scope.matches_with(pattern, record, &mut scratch) {
+            index.lock().unwrap().set(record_idx);
+        }
+        record_idx += 1;
+        if record_idx.is_multiple_of(SEARCH_PROGRESS_EVERY) {
+            scanned.store(record_idx, Ordering::Relaxed);
+        }
+    }
+    scanned.store(record_idx, Ordering::SeqCst);
+    done.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 /// Calculate the layout for the stats page with blocks
@@ -457,7 +646,7 @@ impl TuiViewer {
     ) -> Result<(usize, usize)> {
         let available_height = terminal_height.saturating_sub(2); // Reserve space for header/footer
 
-        if self.is_paired {
+        if self.is_paired() {
             return self.calculate_paired_records_per_page(
                 start_position,
                 available_height,
@@ -466,7 +655,7 @@ impl TuiViewer {
         }
 
         // Read from the already loaded buffer without triggering additional loads
-        let reads_guard = self.buffer.reads.read().unwrap();
+        let reads_guard = self.mates[0].buffer.reads.read().unwrap();
         let start_idx = start_position as usize;
 
         if start_idx >= reads_guard.len() {
@@ -498,8 +687,8 @@ impl TuiViewer {
         available_height: usize,
         terminal_width: usize,
     ) -> Result<(usize, usize)> {
-        let reads_guard = self.buffer.reads.read().unwrap();
-        let reads_guard_r2 = self.buffer_r2.reads.read().unwrap();
+        let reads_guard = self.mates[0].buffer.reads.read().unwrap();
+        let reads_guard_r2 = self.mates[1].buffer.reads.read().unwrap();
         let start_idx = start_position as usize;
 
         if start_idx >= reads_guard.len() || start_idx >= reads_guard_r2.len() {
@@ -545,7 +734,7 @@ impl TuiViewer {
             return Ok(0);
         }
 
-        if self.is_paired {
+        if self.is_paired() {
             return self.calculate_paired_page_up(terminal_height, terminal_width);
         }
 
@@ -554,7 +743,7 @@ impl TuiViewer {
         // needed until we reach the terminal height
         let mut lines_used = 0;
         let mut records_to_move = 0;
-        let reads_guard = self.buffer.reads.read().unwrap();
+        let reads_guard = self.mates[0].buffer.reads.read().unwrap();
         let start_idx = self.current_position as usize;
         for record in reads_guard.iter().take(start_idx).rev() {
             let record_lines = self.calculate_record_lines(record, terminal_width);
@@ -585,8 +774,8 @@ impl TuiViewer {
 
         let mut lines_used = 0;
         let mut pairs_to_move = 0;
-        let reads_guard = self.buffer.reads.read().unwrap();
-        let reads_guard_r2 = self.buffer_r2.reads.read().unwrap();
+        let reads_guard = self.mates[0].buffer.reads.read().unwrap();
+        let reads_guard_r2 = self.mates[1].buffer.reads.read().unwrap();
         let start_idx = self.current_position as usize;
 
         // Iterate backwards through pairs
@@ -629,25 +818,14 @@ impl TuiViewer {
         let backend = TermionBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
-        let buffer = DisplayBuffer::new(&file_path)?;
-
-        let is_paired = file_path_opt2.is_some();
-        let file_path_2 = file_path_opt2.unwrap_or_default();
-        let buffer_r2 = if is_paired {
-            DisplayBuffer::new(&file_path_2)?
-        } else {
-            // Not used when is_paired is false. Opening `file_path` again here
-            // would take a second lock on stdin for piped input and hang.
-            DisplayBuffer::empty()
-        };
+        let mut mates = vec![Mate::open(file_path)?];
+        if let Some(path) = file_path_opt2 {
+            mates.push(Mate::open(path)?);
+        }
 
         let mut viewer = TuiViewer {
             terminal,
-            buffer,
-            buffer_r2,
-            file_path: file_path.clone(),
-            file_path_r2: file_path_2,
-            is_paired,
+            mates,
             current_position: 0,
             horizontal_offset: 0,
             no_wrap: false,
@@ -660,12 +838,6 @@ impl TuiViewer {
             stats_tab: 0,
             help_scroll: 0,
             phred_range: PhredRange::Default,
-            stats: Arc::new(Mutex::new(FastqStats::default())),
-            stats_worker_handle: None,
-            stats_stop_flag: Arc::new(AtomicBool::new(false)),
-            stats_r2: Arc::new(Mutex::new(FastqStats::default())),
-            stats_worker_handle_r2: None,
-            stats_stop_flag_r2: Arc::new(AtomicBool::new(false)),
             color_scheme: ColorScheme::RedGreen,
             search_mode: false,
             search_input: String::new(),
@@ -674,142 +846,35 @@ impl TuiViewer {
             search_include_rc: true,
             search_scope: SearchScope::default(),
             search_scope_auto: false,
-            search_index: Arc::new(Mutex::new(SearchIndex::new())),
-            search_indexed_up_to: 0,
             search_match_k: 0,
-            search_worker_handle: None,
-            search_stop_flag: Arc::new(AtomicBool::new(false)),
-            search_worker_scanned: Arc::new(AtomicU64::new(0)),
-            search_worker_done: Arc::new(AtomicBool::new(true)),
-            search_index_r2: Arc::new(Mutex::new(SearchIndex::new())),
-            search_indexed_up_to_r2: 0,
-            search_match_k_r2: 0,
-            search_worker_handle_r2: None,
-            search_stop_flag_r2: Arc::new(AtomicBool::new(false)),
-            search_worker_scanned_r2: Arc::new(AtomicU64::new(0)),
-            search_worker_done_r2: Arc::new(AtomicBool::new(true)),
         };
 
-        // Start background statistics calculation
-        viewer.start_stats_worker();
-        if viewer.is_paired {
-            viewer.start_stats_worker_r2();
+        // Load the first window so the phred range can be detected before
+        // any statistics are computed with it.
+        for mate in &mut viewer.mates {
+            mate.buffer.load_window(0, BUFFER_WINDOW_SIZE)?;
         }
+        let (phred_min, phred_max) =
+            determine_min_max_phred(&viewer.mates[0].buffer.reads.read().unwrap());
+        viewer.phred_range = PhredRange::from_min_max(phred_min, phred_max);
+
+        for mate in &mut viewer.mates {
+            mate.start_counter();
+        }
+        viewer.restart_stats();
 
         Ok(viewer)
     }
 
-    // Start background statistics calculation
-    pub fn start_stats_worker(&mut self) {
-        // Stop any existing worker first
-        self.stop_stats_worker();
-
-        // Create new stop flag for the new worker
-        self.stats_stop_flag = Arc::new(AtomicBool::new(false));
-
-        let stats_clone = Arc::clone(&self.stats);
-        let phred_range = self.phred_range;
-        let stop_flag = Arc::clone(&self.stats_stop_flag);
-        let reads = Arc::clone(&self.buffer.reads);
-        let file_path = self.file_path.clone();
-
-        // Start fast read counter thread first
-        let stats_for_counter = Arc::clone(&self.stats);
-        let file_path_for_counter = file_path.clone();
-        let stop_flag_for_counter = Arc::clone(&self.stats_stop_flag);
-        thread::spawn(move || {
-            if let Err(e) = Self::count_reads_fast(
-                stats_for_counter,
-                file_path_for_counter.as_str(),
-                stop_flag_for_counter,
-            ) {
-                eprintln!("Read counting error: {}", e);
-            }
-        });
-
-        // Start main stats worker
-        let handle = thread::spawn(move || {
-            if let Err(e) = Self::calculate_stats_background(
-                stats_clone,
-                file_path.as_str(),
-                reads,
-                phred_range,
-                stop_flag,
-            ) {
-                eprintln!("Stats calculation error: {}", e);
-            }
-        });
-
-        self.stats_worker_handle = Some(handle);
+    fn is_paired(&self) -> bool {
+        self.mates.len() == 2
     }
 
-    // Stop the stats worker if it's running
-    fn stop_stats_worker(&mut self) {
-        if let Some(handle) = self.stats_worker_handle.take() {
-            // Signal the worker to stop
-            self.stats_stop_flag.store(true, Ordering::SeqCst);
-            // Wait for it to finish
-            let _ = handle.join();
-        }
-    }
-
-    // Reset stats to default (useful when changing phred range)
-    fn reset_stats(&mut self) {
-        if let Ok(mut stats_lock) = self.stats.lock() {
-            *stats_lock = FastqStats::default();
-        }
-    }
-
-    // Start background statistics calculation for R2 file
-    pub fn start_stats_worker_r2(&mut self) {
-        self.stop_stats_worker_r2();
-
-        self.stats_stop_flag_r2 = Arc::new(AtomicBool::new(false));
-
-        let stats_clone = Arc::clone(&self.stats_r2);
-        let phred_range = self.phred_range;
-        let stop_flag = Arc::clone(&self.stats_stop_flag_r2);
-        let reads = Arc::clone(&self.buffer_r2.reads);
-        let file_path = self.file_path_r2.clone();
-
-        let stats_for_counter = Arc::clone(&self.stats_r2);
-        let file_path_for_counter = file_path.clone();
-        let stop_flag_for_counter = Arc::clone(&self.stats_stop_flag_r2);
-        thread::spawn(move || {
-            if let Err(e) = Self::count_reads_fast(
-                stats_for_counter,
-                file_path_for_counter.as_str(),
-                stop_flag_for_counter,
-            ) {
-                eprintln!("Read counting error (R2): {}", e);
-            }
-        });
-
-        let handle = thread::spawn(move || {
-            if let Err(e) = Self::calculate_stats_background(
-                stats_clone,
-                file_path.as_str(),
-                reads,
-                phred_range,
-                stop_flag,
-            ) {
-                eprintln!("Stats calculation error (R2): {}", e);
-            }
-        });
-
-        self.stats_worker_handle_r2 = Some(handle);
-    }
-
-    fn stop_stats_worker_r2(&mut self) {
-        if let Some(handle) = self.stats_worker_handle_r2.take() {
-            self.stats_stop_flag_r2.store(true, Ordering::SeqCst);
-            let _ = handle.join();
-        }
-    }
-
-    fn reset_stats_r2(&mut self) {
-        if let Ok(mut stats_lock) = self.stats_r2.lock() {
-            *stats_lock = FastqStats::default();
+    /// (Re)compute the statistics of every mate, e.g. after the phred range
+    /// changed.
+    fn restart_stats(&mut self) {
+        for mate in &mut self.mates {
+            mate.start_stats(self.phred_range);
         }
     }
 
@@ -879,94 +944,44 @@ impl TuiViewer {
                 self.search_scope_auto = true;
             }
         }
-        // Stop the previous worker before clearing the index; otherwise it can
-        // set bits from the old pattern/scope after the reset.
-        self.stop_search_worker();
-        self.stop_search_worker_r2();
-        self.search_index.lock().unwrap().reset();
-        self.search_indexed_up_to = 0;
         self.search_match_k = 0;
-        if self.is_paired {
-            self.search_index_r2.lock().unwrap().reset();
-            self.search_indexed_up_to_r2 = 0;
-            self.search_match_k_r2 = 0;
+        for mate in &mut self.mates {
+            mate.reset_search();
         }
-        self.search_pattern = Some(pattern);
+        self.search_pattern = Some(pattern.clone());
         self.index_loaded_records();
-        self.start_search_worker();
-        if self.is_paired {
-            self.start_search_worker_r2();
+        for mate in &mut self.mates {
+            mate.start_search(&pattern, self.search_scope);
         }
     }
 
     /// Clear the active search and stop the look-ahead worker.
     fn clear_search(&mut self) {
-        self.stop_search_worker();
-        self.stop_search_worker_r2();
         self.search_pattern = None;
         self.search_query.clear();
         // Reset the per-search reverse-complement toggle, but keep the scope:
         // it is a sticky preference for how the user likes to search.
         self.search_include_rc = true;
-        self.search_index.lock().unwrap().reset();
-        self.search_indexed_up_to = 0;
         self.search_match_k = 0;
-        if self.is_paired {
-            self.search_index_r2.lock().unwrap().reset();
-            self.search_indexed_up_to_r2 = 0;
-            self.search_match_k_r2 = 0;
+        for mate in &mut self.mates {
+            mate.reset_search();
         }
     }
 
     /// Scan newly loaded records on the main thread and mark matches in the
     /// index. Cheap per frame: only the delta since the last scan is visited.
     fn index_loaded_records(&mut self) {
-        let Some(pattern) = self.search_pattern.clone() else {
-            self.search_indexed_up_to = self.buffer.reads.read().unwrap().len() as u64;
-            if self.is_paired {
-                self.search_indexed_up_to_r2 = self.buffer_r2.reads.read().unwrap().len() as u64;
-            }
-            return;
-        };
-        let reads = self.buffer.reads.read().unwrap();
-        let len = reads.len() as u64;
-        let mut index = self.search_index.lock().unwrap();
-        let mut scratch = MatchScratch::new();
-        for record_idx in self.search_indexed_up_to..len {
-            if self
-                .search_scope
-                .matches_with(&pattern, &reads[record_idx as usize], &mut scratch)
-            {
-                index.set(record_idx);
-            }
-        }
-        self.search_indexed_up_to = len;
-
-        if self.is_paired {
-            let reads_r2 = self.buffer_r2.reads.read().unwrap();
-            let len_r2 = reads_r2.len() as u64;
-            let mut index_r2 = self.search_index_r2.lock().unwrap();
-            for record_idx in self.search_indexed_up_to_r2..len_r2 {
-                if self.search_scope.matches_with(
-                    &pattern,
-                    &reads_r2[record_idx as usize],
-                    &mut scratch,
-                ) {
-                    index_r2.set(record_idx);
-                }
-            }
-            self.search_indexed_up_to_r2 = len_r2;
+        let pattern = self.search_pattern.as_ref();
+        for mate in &mut self.mates {
+            mate.index_loaded(pattern, self.search_scope);
         }
     }
 
     /// Jump to a record index, streaming forward if it is not loaded yet.
     fn jump_to_record(&mut self, record: u64) -> Result<()> {
         self.current_position = record;
-        self.buffer
-            .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
-        if self.is_paired {
-            self.buffer_r2
-                .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
+        for mate in &mut self.mates {
+            mate.buffer.load_window(record, BUFFER_WINDOW_SIZE)?;
         }
         let len = self.loaded_len();
         if len > 0 && self.current_position >= len {
@@ -978,21 +993,15 @@ impl TuiViewer {
     /// Number of records that can be shown. In paired mode the view zips R1
     /// and R2, so only positions loaded in both files count.
     fn loaded_len(&self) -> u64 {
-        let len = self.buffer.reads.read().unwrap().len() as u64;
-        if self.is_paired {
-            len.min(self.buffer_r2.reads.read().unwrap().len() as u64)
-        } else {
-            len
-        }
+        self.mates.iter().map(Mate::reads_loaded).min().unwrap_or(0)
     }
 
     /// Move forward to `target` if that record exists; otherwise stay put, so
     /// scrolling or paging past the last record keeps the last page on screen
     /// instead of an empty one (and an empty input cannot underflow).
     fn move_forward_to(&mut self, target: u64) -> Result<()> {
-        self.buffer.load_window(target, BUFFER_WINDOW_SIZE)?;
-        if self.is_paired {
-            self.buffer_r2.load_window(target, BUFFER_WINDOW_SIZE)?;
+        for mate in &mut self.mates {
+            mate.buffer.load_window(target, BUFFER_WINDOW_SIZE)?;
         }
         if target < self.loaded_len() {
             self.current_position = target;
@@ -1000,28 +1009,42 @@ impl TuiViewer {
         Ok(())
     }
 
+    /// Find a match relative to `from`. In paired mode a match in either mate
+    /// counts. Returns the record and its 1-based number among all matches.
+    fn find_match(&self, from: u64, direction: MatchDirection) -> Option<(u64, u64)> {
+        let index = self.mates[0].search_index.lock().unwrap();
+        if let Some(r2) = self.mates.get(1) {
+            let index_r2 = r2.search_index.lock().unwrap();
+            let target = match direction {
+                MatchDirection::AtOrAfter => index.next_union(&index_r2, from),
+                MatchDirection::Before => index.prev_union(&index_r2, from),
+            }?;
+            Some((target, index.count_union_up_to(&index_r2, target)))
+        } else {
+            let target = match direction {
+                MatchDirection::AtOrAfter => index.next(from),
+                MatchDirection::Before => index.prev(from),
+            }?;
+            Some((target, index.count_up_to(target)))
+        }
+    }
+
+    /// Total number of matching records (pairs count once).
+    fn match_count(&self) -> u64 {
+        let index = self.mates[0].search_index.lock().unwrap();
+        match self.mates.get(1) {
+            Some(r2) => index.count_union_up_to(&r2.search_index.lock().unwrap(), u64::MAX),
+            None => index.count(),
+        }
+    }
+
     /// Jump to the match at or after the current position, including the
     /// current record. Used when a search is committed or its scope changes.
     fn jump_to_first_match(&mut self) {
-        let (target, k) = if self.is_paired {
-            let index = self.search_index.lock().unwrap();
-            let index_r2 = self.search_index_r2.lock().unwrap();
-            let target = index.next_union(&index_r2, self.current_position);
-            let k = target.map(|m| index.count_union_up_to(&index_r2, m));
-            (target, k)
-        } else {
-            let index = self.search_index.lock().unwrap();
-            let target = index.next(self.current_position);
-            let k = target.map(|m| index.count_up_to(m));
-            (target, k)
-        };
-
-        if let Some(m) = target {
-            self.search_match_k = k.unwrap_or(0);
-            if self.is_paired {
-                self.search_match_k_r2 = k.unwrap_or(0);
-            }
-            let _ = self.jump_to_record(m);
+        if let Some((target, k)) = self.find_match(self.current_position, MatchDirection::AtOrAfter)
+        {
+            self.search_match_k = k;
+            let _ = self.jump_to_record(target);
         }
     }
 
@@ -1031,401 +1054,29 @@ impl TuiViewer {
         if self.search_pattern.is_none() {
             return Ok(());
         }
-
-        if self.is_paired {
-            return self.next_match_paired(forward);
-        }
-
-        let index = self.search_index.lock().unwrap();
-        let target = if forward {
-            index.next(self.current_position + 1)
+        let found = if forward {
+            self.find_match(self.current_position + 1, MatchDirection::AtOrAfter)
         } else {
-            index.prev(self.current_position)
+            self.find_match(self.current_position, MatchDirection::Before)
         };
-        let k = target.map(|m| index.count_up_to(m));
-        drop(index);
-        if let Some(m) = target {
-            self.search_match_k = k.unwrap_or(0);
-            self.jump_to_record(m)?;
+        if let Some((target, k)) = found {
+            self.search_match_k = k;
+            self.jump_to_record(target)?;
         }
         Ok(())
     }
 
-    /// Paired next/prev match: a match in either R1 or R2 counts.
-    fn next_match_paired(&mut self, forward: bool) -> Result<()> {
-        let index = self.search_index.lock().unwrap();
-        let index_r2 = self.search_index_r2.lock().unwrap();
-
-        let target = if forward {
-            index.next_union(&index_r2, self.current_position + 1)
-        } else {
-            index.prev_union(&index_r2, self.current_position)
-        };
-        let k = target.map(|m| index.count_union_up_to(&index_r2, m));
-        drop(index_r2);
-        drop(index);
-
-        if let Some(m) = target {
-            self.search_match_k = k.unwrap_or(0);
-            // Also update R2 match count estimate
-            self.search_match_k_r2 = k.unwrap_or(0);
-            self.jump_to_record(m)?;
-        }
-        Ok(())
-    }
-
-    /// Start (or restart) the background look-ahead search worker. Scans the
-    /// whole file on its own reader, setting index bits as it goes. Skipped
-    /// for stdin, which cannot be re-read.
-    fn start_search_worker(&mut self) {
-        self.stop_search_worker();
-        let Some(pattern) = self.search_pattern.clone() else {
-            return;
-        };
-        if self.file_path == "-" {
-            self.search_worker_done.store(true, Ordering::SeqCst);
-            return;
-        }
-
-        self.search_stop_flag = Arc::new(AtomicBool::new(false));
-        self.search_worker_done.store(false, Ordering::SeqCst);
-        self.search_worker_scanned.store(0, Ordering::SeqCst);
-
-        let index = Arc::clone(&self.search_index);
-        let scanned = Arc::clone(&self.search_worker_scanned);
-        let done = Arc::clone(&self.search_worker_done);
-        let stop_flag = Arc::clone(&self.search_stop_flag);
-        let file_path = self.file_path.clone();
-        let scope = self.search_scope;
-
-        let handle = thread::spawn(move || {
-            if let Err(e) = Self::search_background(
-                &pattern, scope, &file_path, index, scanned, done, stop_flag,
-            ) {
-                eprintln!("Search error: {}", e);
-            }
-        });
-        self.search_worker_handle = Some(handle);
-    }
-
-    // Stop the search worker if it is running
-    fn stop_search_worker(&mut self) {
-        if let Some(handle) = self.search_worker_handle.take() {
-            self.search_stop_flag.store(true, Ordering::SeqCst);
-            let _ = handle.join();
-        }
-    }
-
-    fn start_search_worker_r2(&mut self) {
-        self.stop_search_worker_r2();
-        let Some(pattern) = self.search_pattern.clone() else {
-            return;
-        };
-        if self.file_path_r2 == "-" || self.file_path_r2.is_empty() {
-            self.search_worker_done_r2.store(true, Ordering::SeqCst);
-            return;
-        }
-
-        self.search_stop_flag_r2 = Arc::new(AtomicBool::new(false));
-        self.search_worker_done_r2.store(false, Ordering::SeqCst);
-        self.search_worker_scanned_r2.store(0, Ordering::SeqCst);
-
-        let index = Arc::clone(&self.search_index_r2);
-        let scanned = Arc::clone(&self.search_worker_scanned_r2);
-        let done = Arc::clone(&self.search_worker_done_r2);
-        let stop_flag = Arc::clone(&self.search_stop_flag_r2);
-        let file_path = self.file_path_r2.clone();
-        let scope = self.search_scope;
-
-        let handle = thread::spawn(move || {
-            if let Err(e) = Self::search_background(
-                &pattern, scope, &file_path, index, scanned, done, stop_flag,
-            ) {
-                eprintln!("Search error (R2): {}", e);
-            }
-        });
-        self.search_worker_handle_r2 = Some(handle);
-    }
-
-    fn stop_search_worker_r2(&mut self) {
-        if let Some(handle) = self.search_worker_handle_r2.take() {
-            self.search_stop_flag_r2.store(true, Ordering::SeqCst);
-            let _ = handle.join();
-        }
-    }
-
-    /// Background search: stream the file once, setting index bits for every
-    /// record containing a match. This provides look-ahead past the loaded
-    /// buffer without storing anything but the one-bit-per-record index.
-    fn search_background(
-        pattern: &Pattern,
-        scope: SearchScope,
-        file_path: &str,
-        index: Arc<Mutex<SearchIndex>>,
-        scanned: Arc<AtomicU64>,
-        done: Arc<AtomicBool>,
-        stop_flag: Arc<AtomicBool>,
-    ) -> Result<()> {
-        let mut reader = RecordReader::new(FastqReader::new(file_path)?.into_fastq_reader());
-        let mut record_idx = 0u64;
-        let mut scratch = MatchScratch::new();
-        while let Some(record) = reader.next_record()? {
-            if stop_flag.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            if scope.matches_with(pattern, record, &mut scratch) {
-                index.lock().unwrap().set(record_idx);
-            }
-            record_idx += 1;
-            if record_idx.is_multiple_of(10000) {
-                scanned.store(record_idx, Ordering::Relaxed);
-            }
-        }
-        scanned.store(record_idx, Ordering::SeqCst);
-        done.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-
-    // Fast read counter - just counts total reads without detailed analysis
-    fn count_reads_fast(
-        stats: Arc<Mutex<FastqStats>>,
-        file_path: &str,
-        stop_flag: Arc<AtomicBool>,
-    ) -> Result<()> {
-        // Skip counting for stdin (can't read twice)
-        if file_path == "-" {
-            return Ok(());
-        }
-
-        let mut reader = RecordReader::new(FastqReader::new(file_path)?.into_fastq_reader());
-        let mut total_reads = 0u64;
-
-        while reader.next_record()?.is_some() {
-            if stop_flag.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-
-            total_reads += 1;
-
-            // Update count every n reads for faster feedback
-            if total_reads.is_multiple_of(100000) {
-                if let Ok(mut stats_lock) = stats.lock() {
-                    stats_lock.total_reads = total_reads;
-                }
-            }
-        }
-
-        // Final update
-        if !stop_flag.load(Ordering::Relaxed) {
-            if let Ok(mut stats_lock) = stats.lock() {
-                stats_lock.total_reads = total_reads;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn calculate_stats_background(
-        stats: Arc<Mutex<FastqStats>>,
-        file_path: &str,
-        reads: Arc<RwLock<Vec<fastq::Record>>>,
-        phred_range: PhredRange,
-        stop_flag: Arc<AtomicBool>,
-    ) -> Result<()> {
-        let mut total_reads = 0u64;
-        let mut total_length = 0u64;
-        let mut min_length = usize::MAX;
-        let mut max_length = 0usize;
-        let mut quality_histogram =
-            vec![0u64; (phred_range.top_phred() - phred_range.base_phred() + 1) as usize];
-        let mut position_quality_sums = Vec::new();
-        let mut position_counts = Vec::new();
-        let mut total_gc = 0u64;
-        let mut total_n = 0u64;
-        let mut average_read_quality_histogram = vec![0u64; AVG_QUAL_NUM_BINS];
-
-        // Initialize adapter detector
-        let adapter_detector = AdapterDetector::new();
-        let mut local_adapter_stats = AdapterStats::default();
-
-        let is_stdin = file_path == "-";
-
-        {
-            let mut process_record = |record: &fastq::Record| -> Result<bool> {
-                if stop_flag.load(Ordering::Relaxed) {
-                    return Ok(false);
-                }
-
-                total_reads += 1;
-                let seq_len = record.seq().len();
-                total_length += seq_len as u64;
-                min_length = min_length.min(seq_len);
-                max_length = max_length.max(seq_len);
-
-                let seq = record.seq();
-                let qual = record.qual();
-
-                // Combined pass through sequence for GC/N content and adapter detection
-                // This is more cache-friendly than separate passes
-                let mut gc_count = 0u64;
-                let mut n_count = 0u64;
-
-                // Fast GC/N counting
-                for &base in seq {
-                    match base {
-                        b'G' | b'g' | b'C' | b'c' => gc_count += 1,
-                        b'N' | b'n' => n_count += 1,
-                        _ => {}
-                    }
-                }
-
-                total_gc += gc_count;
-                total_n += n_count;
-
-                // Detect adapters in every read
-                let adapter_detections = adapter_detector.detect_adapters(seq);
-                adapter_detector.update_stats(&mut local_adapter_stats, &adapter_detections);
-
-                // Process quality scores with optimized loop
-                let base_phred = phred_range.base_phred();
-                let mut total_qual = 0u32;
-
-                // Ensure position vectors are large enough upfront
-                if seq_len > position_quality_sums.len() {
-                    position_quality_sums.resize(seq_len, 0.0);
-                    position_counts.resize(seq_len, 0);
-                }
-
-                for (pos, &qual_val) in qual.iter().enumerate() {
-                    let quality_score = qual_val.saturating_sub(base_phred);
-                    total_qual += quality_score as u32;
-
-                    // Update histogram
-                    if (quality_score as usize) < quality_histogram.len() {
-                        quality_histogram[quality_score as usize] += 1;
-                    }
-
-                    // Update position-wise quality (no bounds checking needed now)
-                    position_quality_sums[pos] += quality_score as f64;
-                    position_counts[pos] += 1;
-                }
-
-                let average_quality = if seq_len > 0 {
-                    total_qual as f64 / seq_len as f64
-                } else {
-                    0.0
-                };
-
-                average_read_quality_histogram[average_quality_bin(average_quality)] += 1;
-
-                // Update stats every so often and check stop flag
-                if total_reads.is_multiple_of(100000) {
-                    if stop_flag.load(Ordering::Relaxed) {
-                        return Ok(false);
-                    }
-
-                    // Update all stats including histograms, but only every 100k reads
-                    if let Ok(mut stats_lock) = stats.lock() {
-                        stats_lock.processed_reads = total_reads;
-                        stats_lock.avg_length = total_length as f64 / total_reads as f64;
-                        stats_lock.min_length = if min_length == usize::MAX {
-                            0
-                        } else {
-                            min_length
-                        };
-                        stats_lock.max_length = max_length;
-                        stats_lock.gc_content = (total_gc as f64 / total_length as f64) * 100.0;
-                        stats_lock.n_content = (total_n as f64 / total_length as f64) * 100.0;
-
-                        // Update histograms (still expensive but only every 100k)
-                        stats_lock.quality_histogram = quality_histogram.clone();
-                        stats_lock.average_read_quality_histogram =
-                            average_read_quality_histogram.clone();
-                        stats_lock.adapter_stats = local_adapter_stats.clone();
-
-                        // Calculate position quality
-                        stats_lock.position_quality = position_quality_sums
-                            .iter()
-                            .zip(position_counts.iter())
-                            .map(|(sum, count)| {
-                                if *count > 0 {
-                                    sum / (*count as f64)
-                                } else {
-                                    0.0
-                                }
-                            })
-                            .collect();
-                    }
-                }
-                Ok(true)
-            };
-
-            if is_stdin {
-                let snapshot = reads.read().unwrap().clone();
-                for record in snapshot.iter() {
-                    if !process_record(record)? {
-                        return Ok(());
-                    }
-                }
+    /// The first error any background worker reported, for the status line.
+    fn worker_error(&self) -> Option<String> {
+        let paired = self.is_paired();
+        self.mates.iter().enumerate().find_map(|(i, mate)| {
+            let error = mate.worker_error()?;
+            Some(if paired {
+                format!("R{}: {}", i + 1, error)
             } else {
-                let mut reader =
-                    RecordReader::new(FastqReader::new(file_path)?.into_fastq_reader());
-                while let Some(record) = reader.next_record()? {
-                    if !process_record(record)? {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
-        // Final update (only if not stopped)
-        if !stop_flag.load(Ordering::Relaxed) {
-            if let Ok(mut stats_lock) = stats.lock() {
-                // Only update total_reads if fast counter didn't run (stdin case)
-                if file_path == "-" {
-                    stats_lock.total_reads = total_reads;
-                }
-                stats_lock.processed_reads = total_reads;
-                stats_lock.avg_length = if total_reads > 0 {
-                    total_length as f64 / total_reads as f64
-                } else {
-                    0.0
-                };
-                stats_lock.min_length = if min_length == usize::MAX {
-                    0
-                } else {
-                    min_length
-                };
-                stats_lock.max_length = max_length;
-                stats_lock.quality_histogram = quality_histogram;
-                stats_lock.gc_content = if total_length > 0 {
-                    (total_gc as f64 / total_length as f64) * 100.0
-                } else {
-                    0.0
-                };
-                stats_lock.n_content = if total_length > 0 {
-                    (total_n as f64 / total_length as f64) * 100.0
-                } else {
-                    0.0
-                };
-
-                stats_lock.position_quality = position_quality_sums
-                    .iter()
-                    .zip(position_counts.iter())
-                    .map(|(sum, count)| {
-                        if *count > 0 {
-                            sum / (*count as f64)
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect();
-                stats_lock.average_read_quality_histogram = average_read_quality_histogram;
-                stats_lock.adapter_stats = local_adapter_stats;
-                stats_lock.scanned_all = true;
-            }
-        }
-        Ok(())
+                error
+            })
+        })
     }
 
     /// The pattern to use for highlighting right now: while typing a new
@@ -1600,18 +1251,10 @@ impl TuiViewer {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        // Load initial records
-        self.buffer
-            .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
-        if self.is_paired {
-            self.buffer_r2
-                .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
-        }
-
         // Determine where to read keyboard input from:
         // - If reading from a file, stdin is available for keyboard input
         // - If reading from stdin (piped), we need to use /dev/tty for keyboard input
-        let use_tty = self.file_path == "-";
+        let use_tty = self.mates.iter().any(Mate::is_stdin);
         let key_source: Box<dyn Iterator<Item = std::io::Result<Key>> + Send> = if use_tty {
             Box::new(File::open("/dev/tty")?.keys())
         } else {
@@ -1620,13 +1263,9 @@ impl TuiViewer {
 
         let rx = spawn_input_thread(key_source);
 
-        // use the buffered reads to determine the phred range
-        let (phred_min, phred_max) = determine_min_max_phred(&self.buffer.reads.read().unwrap());
-        self.phred_range = PhredRange::from_min_max(phred_min, phred_max);
-
         self.terminal.clear()?;
-        let mut last_stats_update = 0;
         let mut needs_redraw = true;
+        let mut was_busy = true;
         let mut last_terminal_size = self.terminal.size()?;
         loop {
             // Check for terminal resize
@@ -1692,7 +1331,7 @@ impl TuiViewer {
                         self.stats_scroll = 0; // Reset scroll when toggling
                     }
                     Key::Char('\t') => {
-                        if self.show_stats && self.is_paired {
+                        if self.show_stats && self.is_paired() {
                             self.stats_tab = (self.stats_tab + 1) % 2;
                             self.stats_scroll = 0;
                         }
@@ -1733,13 +1372,8 @@ impl TuiViewer {
                             PhredRange::Illumina1_5 => PhredRange::Default,
                             PhredRange::Default => PhredRange::Solexa,
                         };
-                        // Reset stats and restart workers with new phred range
-                        self.reset_stats();
-                        self.start_stats_worker();
-                        if self.is_paired {
-                            self.reset_stats_r2();
-                            self.start_stats_worker_r2();
-                        }
+                        // Recompute the statistics with the new offset
+                        self.restart_stats();
                     }
                     Key::Left => {
                         if self.no_wrap
@@ -1815,42 +1449,21 @@ impl TuiViewer {
                 }
             }
 
-            // Redraw if stats are updating (for both stats view and status line in normal view)
-            if !had_input {
-                if let Ok(stats_lock) = self.stats.try_lock() {
-                    if !stats_lock.scanned_all {
-                        needs_redraw = true;
-                    }
-                }
+            // Stdin statistics follow the reads loaded so far.
+            for mate in &mut self.mates {
+                mate.update_stdin_stats();
             }
+
+            // Keep redrawing while background scans make progress (counts,
+            // stats, search look-ahead), plus one frame after they finish.
+            let busy = self.mates.iter().any(Mate::is_busy);
+            if !had_input && (busy || was_busy) {
+                needs_redraw = true;
+            }
+            was_busy = busy;
 
             // Small delay to prevent excessive CPU usage
             std::thread::sleep(Duration::from_millis(if needs_redraw { 100 } else { 250 }));
-            last_stats_update += if needs_redraw { 100 } else { 250 };
-
-            // For stdin input, check if stats worker needs to be restarted
-            // Only restart if it has finished or crashed, not repeatedly
-            if use_tty && last_stats_update >= 200 {
-                let worker_finished = self
-                    .stats_worker_handle
-                    .as_ref()
-                    .is_none_or(|h| h.is_finished());
-
-                if worker_finished {
-                    self.start_stats_worker();
-                }
-
-                if self.is_paired {
-                    let worker_finished_r2 = self
-                        .stats_worker_handle_r2
-                        .as_ref()
-                        .is_none_or(|h| h.is_finished());
-                    if worker_finished_r2 {
-                        self.start_stats_worker_r2();
-                    }
-                }
-                last_stats_update = 0;
-            }
         }
     }
 
@@ -1875,13 +1488,13 @@ impl TuiViewer {
         let available_height = terminal_size.height.saturating_sub(2) as usize;
         let max_visible = available_height / 2;
 
-        if self.is_paired {
+        if self.is_paired() {
             // --- PAIRED MODE: interleaved R1/R2 with gutter bar ---
-            let records_r1 = self
+            let records_r1 = self.mates[0]
                 .buffer
                 .get_window(self.current_position, max_visible + 5)?;
-            let records_r2 = self
-                .buffer_r2
+            let records_r2 = self.mates[1]
+                .buffer
                 .get_window(self.current_position, max_visible + 5)?;
             for (r1, r2) in records_r1.iter().zip(records_r2.iter()) {
                 prepared_lines.push(self.header_line(r1.id(), r1.desc()));
@@ -2026,7 +1639,7 @@ impl TuiViewer {
             }
         } else {
             // --- SINGLE FILE MODE ---
-            let records = self
+            let records = self.mates[0]
                 .buffer
                 .get_window(self.current_position, max_visible + 5)?;
             for record in records.iter() {
@@ -2114,7 +1727,7 @@ impl TuiViewer {
         }
 
         let wrap_status = if no_wrap { "NO-WRAP" } else { "WRAP" };
-        let mode_display = if self.is_paired {
+        let mode_display = if self.is_paired() {
             "PAIRED"
         } else {
             wrap_status
@@ -2127,15 +1740,7 @@ impl TuiViewer {
         };
 
         let search_status = if self.search_pattern.is_some() {
-            // In paired mode n/N walk the union of R1 and R2 matches, so the
-            // total has to count a pair once even when both mates match.
-            let count = if self.is_paired {
-                let index = self.search_index.lock().unwrap();
-                let index_r2 = self.search_index_r2.lock().unwrap();
-                index.count_union_up_to(&index_r2, u64::MAX)
-            } else {
-                self.search_index.lock().unwrap().count()
-            };
+            let count = self.match_count();
             let mode = match &self.search_pattern {
                 Some(p) if p.is_peptide() => "aa",
                 Some(_) => {
@@ -2152,15 +1757,20 @@ impl TuiViewer {
                 SearchScope::Id => "name ",
                 SearchScope::SequenceAndId => "seq+name ",
             };
-            let mut done = self.search_worker_done.load(Ordering::SeqCst);
-            let mut scanned = self.search_worker_scanned.load(Ordering::SeqCst);
-            if self.is_paired {
-                done &= self.search_worker_done_r2.load(Ordering::SeqCst);
-                scanned = scanned.min(self.search_worker_scanned_r2.load(Ordering::SeqCst));
-            }
+            // Look-ahead is complete once every mate has been scanned.
+            let done = self
+                .mates
+                .iter()
+                .all(|m| m.search_done.load(Ordering::SeqCst));
             let scanning = if done {
                 String::new()
             } else {
+                let scanned = self
+                    .mates
+                    .iter()
+                    .map(|m| m.search_scanned.load(Ordering::SeqCst))
+                    .min()
+                    .unwrap_or(0);
                 format!(" scanning…({})", scanned.to_formatted_string(&Locale::en))
             };
             format!(
@@ -2170,6 +1780,37 @@ impl TuiViewer {
         } else {
             String::new()
         };
+
+        let is_paired = self.is_paired();
+        // Stats page tab: R1, or R2 in paired mode.
+        let stats_mate = if is_paired { self.stats_tab.min(1) } else { 0 };
+        let (stats_total, stats_total_exact) = self.mates[stats_mate].total_reads();
+        let stats_from_stdin = self.mates[stats_mate].is_stdin();
+
+        let file_label = self
+            .mates
+            .iter()
+            .map(|mate| {
+                std::path::Path::new(&mate.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&mate.path)
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let records_label = {
+            let (total, exact) = self.mates[0].total_reads();
+            let total = total.to_formatted_string(&Locale::en);
+            if exact {
+                total
+            } else if self.mates[0].is_stdin() {
+                format!("{total}+")
+            } else {
+                format!("{total}…")
+            }
+        };
+        let worker_error = self.worker_error();
 
         let scope_hint = self.search_scope.label();
         let footer = if self.search_mode {
@@ -2200,29 +1841,19 @@ impl TuiViewer {
             // If showing stats or help, use full screen for them
             if show_stats {
                 // Select stats based on active tab
-                let (stats_lock, label) = if self.is_paired && self.stats_tab == 1 {
-                    (
-                        self.stats_r2.lock().unwrap_or_else(|e| e.into_inner()),
-                        "R2",
-                    )
-                } else {
-                    (self.stats.lock().unwrap_or_else(|e| e.into_inner()), "R1")
-                };
+                let stats_lock = self.mates[stats_mate]
+                    .stats
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let label = if stats_mate == 1 { "R2" } else { "R1" };
 
                 // Calculate layout for stats blocks
                 let (title_area, main_areas) = calculate_stats_layout(full_area);
 
                 // Tab bar + title
-                let is_processing = stats_lock.processed_reads > 0;
-                let status_indicator = if is_processing && !stats_lock.scanned_all {
-                    "..."
-                } else if stats_lock.scanned_all {
-                    ""
-                } else {
-                    "[stalled]"
-                };
+                let status_indicator = if stats_lock.scanned_all { "" } else { "..." };
 
-                let tab_bar = if self.is_paired {
+                let tab_bar = if is_paired {
                     let r1_tab = if self.stats_tab == 0 {
                         Span::styled(
                             " [R1] ",
@@ -2260,16 +1891,23 @@ impl TuiViewer {
                 if let Some(basic_area) = main_areas.first().and_then(|areas| areas.first()) {
                     let basic_stats_content = vec![
                         Line::from(format!(
-                            "Total reads: {}",
-                            stats_lock.total_reads.to_formatted_string(&Locale::en)
+                            "Total reads: {}{}",
+                            stats_total.to_formatted_string(&Locale::en),
+                            match (stats_total_exact, stats_from_stdin) {
+                                (true, _) => "",
+                                (false, true) => "+ (loaded from stdin so far)",
+                                (false, false) => " (counting...)",
+                            }
                         )),
                         Line::from(format!(
                             "Processed: {} {}",
                             stats_lock.processed_reads.to_formatted_string(&Locale::en),
-                            if stats_lock.processed_reads > 0 && !stats_lock.scanned_all {
-                                "(updating...)"
-                            } else if stats_lock.scanned_all {
+                            if stats_lock.scanned_all {
                                 "(complete)"
+                            } else if stats_from_stdin {
+                                "(loaded reads)"
+                            } else if stats_lock.processed_reads > 0 {
+                                "(updating...)"
                             } else {
                                 "(starting...)"
                             }
@@ -2473,29 +2111,10 @@ impl TuiViewer {
                 .split(main_area[0]);
 
             // Status line
-            let filename = std::path::Path::new(&self.file_path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(&self.file_path);
-
-            let file_label = if self.is_paired {
-                let fname2 = std::path::Path::new(&self.file_path_r2)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(&self.file_path_r2);
-                format!("{} | {}", filename, fname2)
-            } else {
-                filename.to_string()
-            };
-
             let status = Paragraph::new(format!(
                 "File: {} | Records: {} | Pos: {} | {} | {} | {} {}-{}{}{}",
                 file_label,
-                self.stats
-                    .lock()
-                    .unwrap()
-                    .total_reads
-                    .to_formatted_string(&Locale::en),
+                records_label,
                 current_position,
                 mode_display,
                 self.orientation.name(),
@@ -2522,9 +2141,13 @@ impl TuiViewer {
 
             f.render_widget(main_content, main_chunks[1]);
 
-            // Help line
-            let help: Paragraph<'_> =
-                Paragraph::new(footer.clone()).style(Style::default().fg(Color::DarkGray));
+            // Help line, or the error of a failed background scan: workers
+            // cannot print while the TUI owns the screen.
+            let help: Paragraph<'_> = match &worker_error {
+                Some(error) => Paragraph::new(format!("Error: {error}"))
+                    .style(Style::default().fg(Color::White).bg(Color::Red)),
+                None => Paragraph::new(footer.clone()).style(Style::default().fg(Color::DarkGray)),
+            };
 
             f.render_widget(help, main_chunks[2]);
         })?;
@@ -2535,10 +2158,9 @@ impl TuiViewer {
 
 impl Drop for TuiViewer {
     fn drop(&mut self) {
-        self.stop_stats_worker();
-        self.stop_stats_worker_r2();
-        self.stop_search_worker();
-        self.stop_search_worker_r2();
+        // Workers stop and join when the mates are dropped; stop them before
+        // restoring the terminal so the exit is not delayed afterwards.
+        self.mates.clear();
 
         let _ = write!(
             self.terminal.backend_mut(),
