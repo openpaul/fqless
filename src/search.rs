@@ -1,5 +1,5 @@
 use bio::alphabets::dna;
-use bio::pattern_matching::bom::BOM;
+use memchr::memmem;
 
 use crate::record::Record;
 use crate::utils::translate_frames;
@@ -178,8 +178,8 @@ pub enum Pattern {
 #[derive(Clone)]
 pub struct DnaPattern {
     literal: Vec<u8>,
-    literal_bom: BOM,
-    rc_bom: Option<BOM>,
+    literal_bom: Needle,
+    rc_bom: Option<Needle>,
 }
 
 impl DnaPattern {
@@ -203,9 +203,9 @@ impl DnaPattern {
         } else {
             literal.clone()
         };
-        let literal_bom = BOM::new(&literal);
+        let literal_bom = Needle::new(&literal);
         let rc_bom = if rc_valid && include_rc {
-            Some(BOM::new(&rc))
+            Some(Needle::new(&rc))
         } else {
             None
         };
@@ -232,15 +232,12 @@ impl DnaPattern {
 
     /// Literal-only match against already-lowercased bytes.
     fn literal_matches_lowercase(&self, lc: &[u8]) -> bool {
-        self.literal_bom.find_all(lc).next().is_some()
+        self.literal_bom.is_match(lc)
     }
 
     fn matches_lowercase(&self, lc: &[u8]) -> bool {
         self.literal_matches_lowercase(lc)
-            || self
-                .rc_bom
-                .as_ref()
-                .is_some_and(|bom| bom.find_all(lc).next().is_some())
+            || self.rc_bom.as_ref().is_some_and(|bom| bom.is_match(lc))
     }
 
     /// Find all matches in `seq`, merging overlapping and adjacent hits into
@@ -266,7 +263,7 @@ impl DnaPattern {
 #[derive(Clone)]
 pub struct PeptidePattern {
     pep: Vec<u8>,
-    bom: BOM,
+    bom: Needle,
 }
 
 impl PeptidePattern {
@@ -281,7 +278,7 @@ impl PeptidePattern {
             .iter()
             .map(|b| b.to_ascii_lowercase())
             .collect();
-        let bom = BOM::new(&pep);
+        let bom = Needle::new(&pep);
         Some(Self { pep, bom })
     }
 
@@ -292,7 +289,7 @@ impl PeptidePattern {
     }
 
     fn matches_lowercase(&self, lc: &[u8]) -> bool {
-        self.bom.find_all(lc).next().is_some()
+        self.bom.is_match(lc)
     }
 
     /// Find all matches in a translated frame, merging overlapping and
@@ -306,6 +303,31 @@ impl PeptidePattern {
             hits.push((start, start + self.pep.len()));
         }
         merged_ranges(&mut hits)
+    }
+}
+
+/// A lowercase literal searched with SIMD `memmem`.
+#[derive(Clone)]
+struct Needle(memmem::Finder<'static>);
+
+impl Needle {
+    fn new(bytes: &[u8]) -> Self {
+        Self(memmem::Finder::new(bytes).into_owned())
+    }
+
+    fn is_match(&self, haystack: &[u8]) -> bool {
+        self.0.find(haystack).is_some()
+    }
+
+    /// Start of every occurrence, including overlapping ones (`aa` occurs
+    /// three times in `aaaa`), so highlighting covers every matching base.
+    fn find_all<'h>(&'h self, haystack: &'h [u8]) -> impl Iterator<Item = usize> + 'h {
+        let mut from = 0;
+        std::iter::from_fn(move || {
+            let start = from + self.0.find(haystack.get(from..)?)?;
+            from = start + 1;
+            Some(start)
+        })
     }
 }
 

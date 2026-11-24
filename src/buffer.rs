@@ -27,6 +27,11 @@ impl DisplayBuffer {
             fully_loaded,
         })
     }
+    /// True once the end of the input has been reached.
+    pub fn is_fully_loaded(&self) -> bool {
+        self.fully_loaded
+    }
+
     pub fn load_window(&mut self, position: u64, n: usize) -> Result<()> {
         while self.buffer_end < position + n as u64 {
             match self.source.next_record()? {
