@@ -2173,3 +2173,53 @@ impl Drop for TuiViewer {
         let _ = self.terminal.flush();
     }
 }
+
+#[cfg(test)]
+mod bench {
+    //! Throughput of the background scans on a real file:
+    //! `FQLESS_BENCH=reads.fq cargo test --release bench -- --ignored --nocapture`
+    use super::*;
+    use std::time::Instant;
+
+    fn path() -> Option<String> {
+        std::env::var("FQLESS_BENCH").ok()
+    }
+
+    fn report(name: &str, start: Instant, path: &str) {
+        let secs = start.elapsed().as_secs_f64();
+        let mb = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) as f64 / 1e6;
+        eprintln!("{name:<14} {secs:>6.2}s  {:>7.0} MB/s", mb / secs);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_scans() {
+        let Some(path) = path() else { return };
+        let stop = AtomicBool::new(false);
+
+        let start = Instant::now();
+        let (total, done) = (AtomicU64::new(0), AtomicBool::new(false));
+        count_reads(&path, &total, &done, &stop).unwrap();
+        report("count", start, &path);
+
+        let start = Instant::now();
+        let stats = Mutex::new(FastqStats::default());
+        scan_stats(&path, PhredRange::Default, &stats, &stop).unwrap();
+        report("stats", start, &path);
+
+        for query in ["ACGTACGTAC", "read12345"] {
+            let pattern = Pattern::new(query, true).unwrap();
+            let scope = if pattern.is_nucleotide_literal() {
+                SearchScope::Sequence
+            } else {
+                SearchScope::Id
+            };
+            let index = Mutex::new(SearchIndex::new());
+            let (scanned, done) = (AtomicU64::new(0), AtomicBool::new(false));
+            let start = Instant::now();
+            scan_search(&path, &pattern, scope, &index, &scanned, &done, &stop).unwrap();
+            report(&format!("search {query}"), start, &path);
+        }
+        eprintln!("reads: {}", total.load(Ordering::Relaxed));
+    }
+}
