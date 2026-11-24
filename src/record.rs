@@ -85,6 +85,13 @@ impl Record {
         self.qual.as_mut()
     }
 
+    /// Replace the qualities with `chars`, reusing the existing buffer.
+    pub(crate) fn set_qual_from(&mut self, chars: impl IntoIterator<Item = u8>) {
+        let qual = self.qual.get_or_insert_with(Vec::new);
+        qual.clear();
+        qual.extend(chars);
+    }
+
     /// Set or clear the qualities, reusing the existing buffer when possible.
     pub(crate) fn set_qual(&mut self, qual: Option<&[u8]>) {
         match (qual, &mut self.qual) {

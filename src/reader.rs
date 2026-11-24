@@ -323,6 +323,49 @@ const SAM_FLAG_SECONDARY: u16 = 0x100;
 /// SAM flag: supplementary alignment (chimeric segment of the same read).
 const SAM_FLAG_SUPPLEMENTARY: u16 = 0x800;
 
+/// Rules SAM, BAM and CRAM share once a record holds SEQ and QUAL.
+///
+/// - `=` means "same base as the reference". The reference is not shown, so
+///   it becomes `N` instead of leaking a non-nucleotide into the statistics
+///   and the translation view.
+/// - Reverse-strand alignments store the reverse complement of the read; it
+///   is flipped back (in place) so every format shows the read as sequenced.
+fn finish_alignment(record: &mut Record, reverse_strand: bool) {
+    let seq = record.seq_mut();
+    for base in seq.iter_mut() {
+        if *base == b'=' {
+            *base = b'N';
+        }
+    }
+    if reverse_strand {
+        seq.reverse();
+        for base in seq.iter_mut() {
+            *base = dna::complement(*base);
+        }
+        if let Some(qual) = record.qual_mut() {
+            qual.reverse();
+        }
+    }
+}
+
+/// BAM and CRAM store raw Phred scores; the viewer works with FASTQ-style
+/// ASCII (score + 33). No scores (QUAL `*` / all 0xFF) means no qualities.
+fn set_phred_scores(record: &mut Record, scores: impl IntoIterator<Item = u8>) {
+    let mut scores = scores.into_iter().peekable();
+    if scores.peek().is_none() {
+        record.set_qual(None);
+    } else {
+        record.set_qual_from(scores.map(|score| score.saturating_add(33)));
+    }
+}
+
+/// Read names are shown as text; invalid UTF-8 is replaced rather than
+/// rejected. Valid names (the normal case) are not copied an extra time.
+fn set_alignment_name(record: &mut Record, name: Option<&[u8]>) {
+    let name = name.map(String::from_utf8_lossy).unwrap_or_default();
+    record.set_name(&name, None);
+}
+
 /// SAM parser: tab-separated alignment records after an optional header.
 ///
 /// Only sequence-level fields are used (QNAME, FLAG, SEQ, QUAL). Secondary and
@@ -418,16 +461,7 @@ impl RecordSource for SamSource {
             self.record.seq_mut().clear();
             self.record.seq_mut().extend_from_slice(seq);
             self.record.set_qual((qual != b"*").then_some(qual));
-
-            if flag & SAM_FLAG_REVERSE != 0 {
-                let revcomp = dna::revcomp(self.record.seq());
-                let seq = self.record.seq_mut();
-                seq.clear();
-                seq.extend_from_slice(&revcomp);
-                if let Some(qual) = self.record.qual_mut() {
-                    qual.reverse();
-                }
-            }
+            finish_alignment(&mut self.record, flag & SAM_FLAG_REVERSE != 0);
 
             return Ok(Some(&self.record));
         }
@@ -444,7 +478,6 @@ pub struct BamSource {
     reader: noodles_bam::io::Reader<Box<dyn BufRead>>,
     scratch: noodles_bam::Record,
     record: Record,
-    qual_buf: Vec<u8>,
     done: bool,
 }
 
@@ -459,7 +492,6 @@ impl BamSource {
             reader,
             scratch: noodles_bam::Record::default(),
             record: Record::new(),
-            qual_buf: Vec::new(),
             done: false,
         })
     }
@@ -492,45 +524,16 @@ impl RecordSource for BamSource {
                 continue;
             }
 
-            let name = self
-                .scratch
-                .name()
-                .map(|name| String::from_utf8_lossy(name).into_owned())
-                .unwrap_or_default();
-            self.record.set_name(&name, None);
-
-            // BAM packs bases four to a byte and uses '=' for a base that
-            // matches the reference. The reference is not available here, so
-            // '=' becomes 'N' rather than leaking a non-alphabet character
-            // into the statistics and translation views.
+            set_alignment_name(
+                &mut self.record,
+                self.scratch.name().map(|name| name.as_ref()),
+            );
+            // BAM packs bases four to a byte; unpack them into the record.
             let seq = self.record.seq_mut();
             seq.clear();
-            seq.extend(
-                sequence
-                    .iter()
-                    .map(|base| if base == b'=' { b'N' } else { base }),
-            );
-
-            // BAM stores raw Phred scores; FASTQ-style ASCII is score + 33.
-            let quality_scores = self.scratch.quality_scores();
-            if quality_scores.is_empty() {
-                self.record.set_qual(None);
-            } else {
-                self.qual_buf.clear();
-                self.qual_buf
-                    .extend(quality_scores.iter().map(|score| score.saturating_add(33)));
-                self.record.set_qual(Some(&self.qual_buf));
-            }
-
-            if flags.is_reverse_complemented() {
-                let revcomp = dna::revcomp(self.record.seq());
-                let seq = self.record.seq_mut();
-                seq.clear();
-                seq.extend_from_slice(&revcomp);
-                if let Some(qual) = self.record.qual_mut() {
-                    qual.reverse();
-                }
-            }
+            seq.extend(sequence.iter());
+            set_phred_scores(&mut self.record, self.scratch.quality_scores().iter());
+            finish_alignment(&mut self.record, flags.is_reverse_complemented());
 
             return Ok(Some(&self.record));
         }
@@ -552,7 +555,6 @@ pub struct CramSource {
     container: noodles_cram::io::reader::Container,
     pending: std::vec::IntoIter<noodles_sam::alignment::RecordBuf>,
     record: Record,
-    qual_buf: Vec<u8>,
     done: bool,
 }
 
@@ -571,7 +573,6 @@ impl CramSource {
             container: noodles_cram::io::reader::Container::default(),
             pending: Vec::new().into_iter(),
             record: Record::new(),
-            qual_buf: Vec::new(),
             done: false,
         })
     }
@@ -632,44 +633,15 @@ impl CramSource {
             return false;
         }
 
-        let name = src
-            .name()
-            .map(|name| String::from_utf8_lossy(name).into_owned())
-            .unwrap_or_default();
-        self.record.set_name(&name, None);
-
+        set_alignment_name(&mut self.record, src.name().map(|name| name.as_ref()));
         let seq = self.record.seq_mut();
         seq.clear();
-        seq.extend(
-            sequence
-                .as_ref()
-                .iter()
-                .map(|base| if *base == b'=' { b'N' } else { *base }),
+        seq.extend_from_slice(sequence.as_ref());
+        set_phred_scores(
+            &mut self.record,
+            src.quality_scores().as_ref().iter().copied(),
         );
-
-        let quality_scores = src.quality_scores();
-        if quality_scores.is_empty() {
-            self.record.set_qual(None);
-        } else {
-            self.qual_buf.clear();
-            self.qual_buf.extend(
-                quality_scores
-                    .as_ref()
-                    .iter()
-                    .map(|score| score.saturating_add(33)),
-            );
-            self.record.set_qual(Some(&self.qual_buf));
-        }
-
-        if flags.is_reverse_complemented() {
-            let revcomp = dna::revcomp(self.record.seq());
-            let seq = self.record.seq_mut();
-            seq.clear();
-            seq.extend_from_slice(&revcomp);
-            if let Some(qual) = self.record.qual_mut() {
-                qual.reverse();
-            }
-        }
+        finish_alignment(&mut self.record, flags.is_reverse_complemented());
 
         true
     }
@@ -1297,6 +1269,25 @@ mod tests {
         assert_eq!(record.seq(), b"ACGT");
         assert_eq!(record.qual(), None);
         assert!(!record.has_quality());
+    }
+
+    #[test]
+    fn test_sam_reference_equal_bases_become_n() {
+        // '=' (base equal to the reference) is legal in SAM SEQ, as in BAM.
+        // On the reverse strand it is complemented like any other N.
+        let content = format!(
+            "{SAM_HEADER}fwd\t0\tchr1\t7\t60\t4M\t*\t0\t0\tA=GT\tIIII\n\
+             rev\t16\tchr1\t7\t60\t4M\t*\t0\t0\tA=GG\tABCD\n"
+        );
+        let temp_file = create_temp_fastq(&content);
+        let path = temp_file.path().to_str().unwrap();
+
+        let mut source = open_source(path, None).expect("Failed to open SAM");
+        let fwd = next_owned(source.as_mut()).unwrap().unwrap();
+        assert_eq!(fwd.seq(), b"ANGT");
+        let rev = next_owned(source.as_mut()).unwrap().unwrap();
+        assert_eq!(rev.seq(), b"CCNT");
+        assert_eq!(rev.qual(), Some(&b"DCBA"[..]));
     }
 
     #[test]
