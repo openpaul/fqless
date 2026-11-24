@@ -244,7 +244,9 @@ pub fn translate_frames(seq: &[u8]) -> Vec<String> {
         .collect()
 }
 
-pub fn determine_min_max_phred(records: &[Record]) -> Option<(u8, u8)> {
+pub fn determine_min_max_phred<'a>(
+    records: impl IntoIterator<Item = &'a Record>,
+) -> Option<(u8, u8)> {
     let mut min_phred = u8::MAX;
     let mut max_phred = u8::MIN;
     let mut saw_quality = false;

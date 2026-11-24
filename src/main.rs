@@ -2,6 +2,7 @@ mod adapter;
 mod app;
 mod buffer;
 mod color;
+mod ordinal;
 mod reader;
 mod record;
 mod search;

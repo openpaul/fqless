@@ -1,6 +1,7 @@
 use crate::buffer::DisplayBuffer;
 use crate::color::ColorScheme;
-use crate::reader::{open_source, RecordSource};
+use crate::ordinal::{OrdinalIndex, SPACING};
+use crate::reader::Input;
 use crate::record::Record;
 use crate::search::{MatchScratch, Pattern, SearchIndex, SearchScope};
 use crate::stats::{ReadStats, StatsAccumulator, AVG_QUAL_BIN_WIDTH, AVG_QUAL_NUM_BINS};
@@ -27,11 +28,12 @@ use signal_hook::consts::SIGINT;
 use signal_hook::flag;
 use std::cmp::min;
 use std::io::stdin;
+use std::ops::Range;
 use std::os::unix::io::AsRawFd;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, RwLock,
 };
 use std::thread;
 use std::time::Duration;
@@ -98,32 +100,38 @@ struct Mate {
     /// cannot be read twice, so for stdin only loaded reads are known.
     total_reads: Arc<AtomicU64>,
     count_done: Arc<AtomicBool>,
+    /// Checkpoints for jumping to a read number, recorded by the counter.
+    ordinal_index: Arc<RwLock<OrdinalIndex>>,
     counter: Worker,
     stats: Arc<Mutex<ReadStats>>,
     stats_worker: Worker,
     /// Stdin statistics, accumulated on the main thread from loaded reads.
     stdin_stats: Option<StatsAccumulator>,
     search_index: Arc<Mutex<SearchIndex>>,
-    search_indexed_up_to: u64,
+    /// Loaded reads already checked against the current search pattern.
+    search_indexed: Range<u64>,
     search_worker: Worker,
     search_scanned: Arc<AtomicU64>,
     search_done: Arc<AtomicBool>,
 }
 
 impl Mate {
-    fn open(path: String, reference: Option<String>) -> Result<Self> {
-        let buffer = DisplayBuffer::new(&path, reference.as_deref())?;
+    fn open(path: &str, reference: Option<&str>) -> Result<Self> {
+        let input = Input::new(path, reference);
+        let ordinal_index = Arc::new(RwLock::new(OrdinalIndex::default()));
+        let buffer = DisplayBuffer::new(input.clone(), Arc::clone(&ordinal_index))?;
         Ok(Self {
-            input: Input { path, reference },
+            input,
             buffer,
             total_reads: Arc::new(AtomicU64::new(0)),
             count_done: Arc::new(AtomicBool::new(false)),
+            ordinal_index,
             counter: Worker::default(),
             stats: Arc::new(Mutex::new(ReadStats::default())),
             stats_worker: Worker::default(),
             stdin_stats: None,
             search_index: Arc::new(Mutex::new(SearchIndex::new())),
-            search_indexed_up_to: 0,
+            search_indexed: 0..0,
             search_worker: Worker::default(),
             search_scanned: Arc::new(AtomicU64::new(0)),
             search_done: Arc::new(AtomicBool::new(true)),
@@ -131,18 +139,22 @@ impl Mate {
     }
 
     fn is_stdin(&self) -> bool {
-        self.input.path == "-"
+        self.input.is_stdin()
     }
 
+    /// Reads known to exist so far (see [`DisplayBuffer::available`]).
     fn reads_loaded(&self) -> u64 {
-        self.buffer.reads.read().unwrap().len() as u64
+        self.buffer.available()
     }
 
     /// Reads in the input and whether that number is final. For stdin it is
     /// the number loaded so far until the end of the input has been reached.
     fn total_reads(&self) -> (u64, bool) {
+        if let Some(end) = self.buffer.end() {
+            return (end, true);
+        }
         if self.is_stdin() {
-            (self.reads_loaded(), self.buffer.is_fully_loaded())
+            (self.reads_loaded(), false)
         } else {
             (
                 self.total_reads.load(Ordering::Relaxed),
@@ -151,8 +163,9 @@ impl Mate {
         }
     }
 
-    /// Count the reads of a file in the background. Counting does not depend
-    /// on any view setting, so this runs once.
+    /// Count the reads of a file in the background, recording seek
+    /// checkpoints on the way. Neither depends on a view setting, so this
+    /// runs once.
     fn start_counter(&mut self) {
         if self.is_stdin() {
             return;
@@ -160,7 +173,8 @@ impl Mate {
         let input = self.input.clone();
         let total = Arc::clone(&self.total_reads);
         let done = Arc::clone(&self.count_done);
-        self.counter = Worker::spawn(move |stop| count_reads(&input, &total, &done, stop));
+        let index = Arc::clone(&self.ordinal_index);
+        self.counter = Worker::spawn(move |stop| count_reads(&input, &total, &done, &index, stop));
     }
 
     /// Start computing statistics from scratch with `phred_range`.
@@ -180,17 +194,17 @@ impl Mate {
 
     /// Add reads loaded from stdin since the last call to its statistics.
     /// Only the new reads are visited, so this is cheap to call every frame.
+    /// Stdin keeps every read loaded, so none can be missed.
     fn update_stdin_stats(&mut self) {
         let Some(acc) = self.stdin_stats.as_mut() else {
             return;
         };
-        let reads = self.buffer.reads.read().unwrap();
-        let seen = acc.reads() as usize;
+        let seen = acc.reads();
         let complete = self.buffer.is_fully_loaded();
-        if seen == reads.len() && self.stats.lock().unwrap().scanned_all == complete {
+        if seen == self.buffer.available() && self.stats.lock().unwrap().scanned_all == complete {
             return;
         }
-        for record in &reads[seen..] {
+        for record in self.buffer.iter_from(seen) {
             acc.add(record);
         }
         acc.snapshot_into(&mut self.stats.lock().unwrap(), complete);
@@ -201,25 +215,43 @@ impl Mate {
         // bits from the old pattern/scope after the reset.
         self.search_worker.stop();
         self.search_index.lock().unwrap().reset();
-        self.search_indexed_up_to = 0;
+        self.search_indexed = 0..0;
         self.search_done.store(true, Ordering::SeqCst);
         self.search_scanned.store(0, Ordering::SeqCst);
     }
 
-    /// Mark matches among the reads loaded since the last call.
+    /// Mark matches among loaded reads that have not been checked yet. The
+    /// window moves as the view does, so only the reads that entered it
+    /// since the last call are visited; setting a bit twice is harmless.
     fn index_loaded(&mut self, pattern: Option<&Pattern>, scope: SearchScope) {
-        let reads = self.buffer.reads.read().unwrap();
-        let len = reads.len() as u64;
-        if let Some(pattern) = pattern {
-            let mut index = self.search_index.lock().unwrap();
-            let mut scratch = MatchScratch::new();
-            for record_idx in self.search_indexed_up_to..len {
-                if scope.matches_with(pattern, &reads[record_idx as usize], &mut scratch) {
-                    index.set(record_idx);
+        let loaded = self.buffer.loaded();
+        let Some(pattern) = pattern else {
+            self.search_indexed = loaded;
+            return;
+        };
+        let done = &self.search_indexed;
+        let fresh = if done.start <= loaded.end && loaded.start <= done.end && !done.is_empty() {
+            // Overlapping (or touching) windows: check the parts outside.
+            [
+                loaded.start..done.start.max(loaded.start),
+                done.end.min(loaded.end)..loaded.end,
+            ]
+        } else {
+            [loaded.clone(), 0..0]
+        };
+
+        let mut index = self.search_index.lock().unwrap();
+        let mut scratch = MatchScratch::new();
+        for range in fresh {
+            for ordinal in range {
+                if let Some(record) = self.buffer.get(ordinal) {
+                    if scope.matches_with(pattern, record, &mut scratch) {
+                        index.set(ordinal);
+                    }
                 }
             }
         }
-        self.search_indexed_up_to = len;
+        self.search_indexed = loaded;
     }
 
     /// Start the look-ahead search over the whole file. Skipped for stdin,
@@ -259,32 +291,38 @@ impl Mate {
     }
 }
 
-/// An input file and the reference needed to decode it (CRAM only), so
-/// background scans can open their own reader on it.
-#[derive(Clone)]
-struct Input {
-    path: String,
-    reference: Option<String>,
-}
-
-impl Input {
-    fn open(&self) -> Result<Box<dyn RecordSource>> {
-        open_source(&self.path, self.reference.as_deref())
-    }
-}
-
-/// Count the reads of `path`, publishing the running total.
+/// Count the reads of `input`, publishing the running total, and record a
+/// checkpoint about every [`SPACING`] reads
+/// when the input can seek.
 fn count_reads(
     input: &Input,
     total: &AtomicU64,
     done: &AtomicBool,
+    index: &RwLock<OrdinalIndex>,
     stop: &AtomicBool,
 ) -> Result<()> {
     let mut reader = input.open()?;
     let mut count = 0u64;
-    while reader.next_record()?.is_some() {
+    // Read 0 is the start of the file, so the first checkpoint is one
+    // spacing in. CRAM can only seek to container starts, so a due
+    // checkpoint waits for the next one.
+    let mut next_checkpoint = SPACING;
+    loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
+        }
+        // The checkpoint is where the read about to be decoded starts.
+        let checkpoint = if count >= next_checkpoint {
+            reader.checkpoint()
+        } else {
+            None
+        };
+        if reader.next_record()?.is_none() {
+            break;
+        }
+        if let Some(checkpoint) = checkpoint {
+            index.write().unwrap().push(count, checkpoint);
+            next_checkpoint = count + SPACING;
         }
         count += 1;
         if count.is_multiple_of(COUNT_PROGRESS_EVERY) {
@@ -681,19 +719,12 @@ impl TuiViewer {
             );
         }
 
-        // Read from the already loaded buffer without triggering additional loads
-        let reads_guard = self.mates[0].buffer.reads.read().unwrap();
-        let start_idx = start_position as usize;
-
-        if start_idx >= reads_guard.len() {
-            return Ok((0, 0)); // No records available at this position
-        }
-
+        // Read from the already loaded window without triggering more loads
         let mut lines_used = 0;
         let mut records_count = 0;
 
         // Check records from start_position onwards
-        for record in reads_guard.iter().skip(start_idx) {
+        for record in self.mates[0].buffer.iter_from(start_position) {
             let record_lines = self.calculate_record_lines(record, terminal_width);
 
             if lines_used + record_lines > available_height {
@@ -714,21 +745,13 @@ impl TuiViewer {
         available_height: usize,
         terminal_width: usize,
     ) -> Result<(usize, usize)> {
-        let reads_guard = self.mates[0].buffer.reads.read().unwrap();
-        let reads_guard_r2 = self.mates[1].buffer.reads.read().unwrap();
-        let start_idx = start_position as usize;
-
-        if start_idx >= reads_guard.len() || start_idx >= reads_guard_r2.len() {
-            return Ok((0, 0));
-        }
-
         let mut lines_used = 0;
         let mut pairs_count = 0;
 
-        for (r1, r2) in reads_guard
-            .iter()
-            .skip(start_idx)
-            .zip(reads_guard_r2.iter().skip(start_idx))
+        for (r1, r2) in self.mates[0]
+            .buffer
+            .iter_from(start_position)
+            .zip(self.mates[1].buffer.iter_from(start_position))
         {
             let pair_lines = self.calculate_paired_record_lines(r1, r2, terminal_width);
             if lines_used + pair_lines > available_height {
@@ -768,11 +791,14 @@ impl TuiViewer {
         // We need to work backwards to find where to start so that moving forward
         // From current position we move bacjwards -1 and sum up the lines
         // needed until we reach the terminal height
+        // The caller loaded a screen's worth of reads before the current one.
         let mut lines_used = 0;
         let mut records_to_move = 0;
-        let reads_guard = self.mates[0].buffer.reads.read().unwrap();
-        let start_idx = self.current_position as usize;
-        for record in reads_guard.iter().take(start_idx).rev() {
+        let buffer = &self.mates[0].buffer;
+        for ordinal in (0..self.current_position).rev() {
+            let Some(record) = buffer.get(ordinal) else {
+                break;
+            };
             let record_lines = self.calculate_record_lines(record, terminal_width);
             if lines_used + record_lines > terminal_height {
                 break; // This record would not fit
@@ -801,20 +827,15 @@ impl TuiViewer {
 
         let mut lines_used = 0;
         let mut pairs_to_move = 0;
-        let reads_guard = self.mates[0].buffer.reads.read().unwrap();
-        let reads_guard_r2 = self.mates[1].buffer.reads.read().unwrap();
-        let start_idx = self.current_position as usize;
-
         // Iterate backwards through pairs
-        for i in (0..start_idx).rev() {
-            if i >= reads_guard.len() || i >= reads_guard_r2.len() {
+        for ordinal in (0..self.current_position).rev() {
+            let (Some(r1), Some(r2)) = (
+                self.mates[0].buffer.get(ordinal),
+                self.mates[1].buffer.get(ordinal),
+            ) else {
                 break;
-            }
-            let pair_lines = self.calculate_paired_record_lines(
-                &reads_guard[i],
-                &reads_guard_r2[i],
-                terminal_width,
-            );
+            };
+            let pair_lines = self.calculate_paired_record_lines(r1, r2, terminal_width);
             if lines_used + pair_lines > terminal_height {
                 break;
             }
@@ -849,9 +870,9 @@ impl TuiViewer {
         let backend = TermionBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
-        let mut mates = vec![Mate::open(file_path, reference.clone())?];
+        let mut mates = vec![Mate::open(&file_path, reference.as_deref())?];
         if let Some(path) = file_path_opt2 {
-            mates.push(Mate::open(path, reference)?);
+            mates.push(Mate::open(&path, reference.as_deref())?);
         }
 
         let mut viewer = TuiViewer {
@@ -883,11 +904,11 @@ impl TuiViewer {
         // Load the first window so the phred range can be detected before
         // any statistics are computed with it.
         for mate in &mut viewer.mates {
-            mate.buffer.load_window(0, BUFFER_WINDOW_SIZE)?;
+            mate.buffer.ensure(0, BUFFER_WINDOW_SIZE)?;
         }
         // Inputs without qualities (FASTA) keep the default range.
         if let Some((phred_min, phred_max)) =
-            determine_min_max_phred(&viewer.mates[0].buffer.reads.read().unwrap())
+            determine_min_max_phred(viewer.mates[0].buffer.iter_from(0))
         {
             viewer.phred_range = PhredRange::from_min_max(phred_min, phred_max);
         }
@@ -1015,11 +1036,30 @@ impl TuiViewer {
     fn jump_to_record(&mut self, record: u64) -> Result<()> {
         self.current_position = record;
         for mate in &mut self.mates {
-            mate.buffer.load_window(record, BUFFER_WINDOW_SIZE)?;
+            mate.buffer.ensure(record, BUFFER_WINDOW_SIZE)?;
         }
         let len = self.loaded_len();
         if len > 0 && self.current_position >= len {
             self.current_position = len - 1;
+        }
+        Ok(())
+    }
+
+    /// Jump to the last record (End / G) once the number of reads is known.
+    /// With the ordinal index this seeks close to the end of a BAM/CRAM file
+    /// instead of decoding everything before it. Until the count is final
+    /// (still counting, or stdin not read to the end) the key does nothing.
+    fn jump_to_last_record(&mut self) -> Result<()> {
+        let mut last = None;
+        for mate in &self.mates {
+            let (total, exact) = mate.total_reads();
+            if !exact {
+                return Ok(());
+            }
+            last = Some(last.map_or(total, |last: u64| last.min(total)));
+        }
+        if let Some(last) = last.and_then(|total| total.checked_sub(1)) {
+            self.jump_to_record(last)?;
         }
         Ok(())
     }
@@ -1035,7 +1075,7 @@ impl TuiViewer {
     /// instead of an empty one (and an empty input cannot underflow).
     fn move_forward_to(&mut self, target: u64) -> Result<()> {
         for mate in &mut self.mates {
-            mate.buffer.load_window(target, BUFFER_WINDOW_SIZE)?;
+            mate.buffer.ensure(target, BUFFER_WINDOW_SIZE)?;
         }
         if target < self.loaded_len() {
             self.current_position = target;
@@ -1490,6 +1530,13 @@ impl TuiViewer {
                             self.help_scroll = self.help_scroll.saturating_sub(PAGE_SCROLL_AMOUNT);
                         } else {
                             let terminal_size = self.terminal.size()?;
+                            // Page up looks at the reads before the current one,
+                            // which may lie before the loaded window.
+                            let height = terminal_size.height as u64;
+                            let from = self.current_position.saturating_sub(height);
+                            for mate in &mut self.mates {
+                                mate.buffer.ensure(from, height as usize)?;
+                            }
                             let new_position = self.calculate_page_up(
                                 terminal_size.height as usize,
                                 terminal_size.width as usize,
@@ -1505,6 +1552,9 @@ impl TuiViewer {
                         } else {
                             self.current_position = 0;
                         }
+                    }
+                    Key::End | Key::Char('G') if !self.show_stats && !self.show_help => {
+                        self.jump_to_last_record()?;
                     }
                     _ => {}
                 }
@@ -2305,7 +2355,8 @@ mod bench {
 
         let start = Instant::now();
         let (total, done) = (AtomicU64::new(0), AtomicBool::new(false));
-        count_reads(&input, &total, &done, &stop).unwrap();
+        let index = RwLock::new(OrdinalIndex::default());
+        count_reads(&input, &total, &done, &index, &stop).unwrap();
         report("count", start, &path);
 
         let start = Instant::now();

@@ -13,6 +13,46 @@ use std::io::{self, BufRead, BufReader, Read, Seek};
 /// scans allocation-free.
 pub trait RecordSource {
     fn next_record(&mut self) -> Result<Option<&Record>>;
+
+    /// A position the record returned by the next call to
+    /// [`next_record`](Self::next_record) can be read again from with
+    /// [`seek`](Self::seek). `None` when the input cannot seek (stdin, gzip,
+    /// text formats) or the next record does not start at such a position
+    /// (inside a CRAM container).
+    fn checkpoint(&mut self) -> Option<u64> {
+        None
+    }
+
+    /// Continue reading at a position returned by [`checkpoint`](Self::checkpoint).
+    fn seek(&mut self, _checkpoint: u64) -> Result<()> {
+        anyhow::bail!("this input does not support seeking")
+    }
+}
+
+/// An input file and the reference needed to decode it (CRAM only). Every
+/// reader of the same input (the view, background scans, re-reads) opens it
+/// through this.
+#[derive(Clone, Debug)]
+pub struct Input {
+    pub path: String,
+    pub reference: Option<String>,
+}
+
+impl Input {
+    pub fn new(path: &str, reference: Option<&str>) -> Self {
+        Self {
+            path: path.to_string(),
+            reference: reference.map(str::to_string),
+        }
+    }
+
+    pub fn is_stdin(&self) -> bool {
+        self.path == "-"
+    }
+
+    pub fn open(&self) -> Result<Box<dyn RecordSource>> {
+        open_source(&self.path, self.reference.as_deref())
+    }
 }
 
 /// Open `path` (or stdin for `-`) and choose a parser from its contents.
@@ -22,12 +62,20 @@ pub trait RecordSource {
 /// is the FASTA used to decode CRAM input and is ignored by the other formats.
 pub fn open_source(path: &str, reference: Option<&str>) -> Result<Box<dyn RecordSource>> {
     let mut input = InputReader::new(path)?;
+    let is_file = path != "-";
 
-    // BAM and CRAM are binary, so check their magic first; the stream is
+    // BAM and CRAM are binary, so check their magic first. The stream is
     // already decompressed, which is why this works for BGZF and plain BAM
     // alike.
     let is_bam = input.peek(4)?.starts_with(b"BAM\x01");
     if is_bam {
+        if is_file && input.is_compressed() {
+            // A BAM file is BGZF. Reading its blocks directly instead of the
+            // decompressed stream keeps the virtual offsets, so it can seek.
+            let file = File::open(path).with_context(|| format!("Failed to open file: {path}"))?;
+            let bgzf = noodles_bgzf::io::Reader::new(BufReader::new(file));
+            return Ok(Box::new(BamSource::new(bgzf)?));
+        }
         return Ok(Box::new(BamSource::new(input.into_inner())?));
     }
 
@@ -38,6 +86,12 @@ pub fn open_source(path: &str, reference: Option<&str>) -> Result<Box<dyn Record
                 "CRAM input requires a reference FASTA; pass --reference <path> (or -r <path>)"
             )
         })?;
+        if is_file && !input.is_compressed() {
+            // Reading the file itself (not a stream) lets CRAM seek to
+            // container boundaries.
+            let file = File::open(path).with_context(|| format!("Failed to open file: {path}"))?;
+            return Ok(Box::new(CramSource::new(BufReader::new(file), reference)?));
+        }
         return Ok(Box::new(CramSource::new(input.into_inner(), reference)?));
     }
 
@@ -96,56 +150,46 @@ fn trim_ascii_end(line: &[u8]) -> &[u8] {
     &line[..end]
 }
 
+const GZIP_MAGIC: &[u8] = &[0x1f, 0x8b];
+
 /// Unified reader that handles both files and stdin, with automatic compression detection.
 ///
 /// This only produces decompressed bytes; interpreting them as a sequencing
 /// format is the job of [`RecordSource`] implementations.
 pub struct InputReader {
     inner: Box<dyn BufRead>,
+    compressed: bool,
 }
 
 impl InputReader {
     /// Create a new reader from a file path or "-" for stdin
     pub fn new(input: &str) -> Result<Self> {
         if input == "-" {
-            let stdin = io::stdin();
-            let mut buf_reader = BufReader::new(stdin.lock());
-
-            let buffer = buf_reader.fill_buf()?;
-            let reader: Box<dyn BufRead> = if buffer.starts_with(&[0x1F, 0x8B]) {
+            let mut buf_reader = BufReader::new(io::stdin().lock());
+            let compressed = buf_reader.fill_buf()?.starts_with(GZIP_MAGIC);
+            let inner: Box<dyn BufRead> = if compressed {
                 Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
             } else {
                 Box::new(buf_reader)
             };
-            Ok(InputReader { inner: reader })
-        } else {
-            // Handle file
-            let mut file =
-                File::open(input).with_context(|| format!("Failed to open file: {}", input))?;
-
-            // Check if file is gzipped by reading magic bytes
-            let mut magic = [0; 2];
-            let reader: Box<dyn BufRead> = match file.read_exact(&mut magic) {
-                Ok(_) => {
-                    // Rewind to start of file
-                    file.seek(std::io::SeekFrom::Start(0))?;
-                    if magic == [0x1f, 0x8b] {
-                        // Gzipped file
-                        let gz_decoder = MultiGzDecoder::new(BufReader::new(file));
-                        Box::new(BufReader::new(gz_decoder))
-                    } else {
-                        // Plain text file
-                        Box::new(BufReader::new(file))
-                    }
-                }
-                Err(_) => {
-                    // Empty file or error - treat as plain text
-                    Box::new(BufReader::new(file))
-                }
-            };
-
-            Ok(InputReader { inner: reader })
+            return Ok(InputReader { inner, compressed });
         }
+
+        let file = File::open(input).with_context(|| format!("Failed to open file: {}", input))?;
+        let mut file = BufReader::new(file);
+        // An empty file is plain text with no records.
+        let compressed = file.fill_buf()?.starts_with(GZIP_MAGIC);
+        let inner: Box<dyn BufRead> = if compressed {
+            Box::new(BufReader::new(MultiGzDecoder::new(file)))
+        } else {
+            Box::new(file)
+        };
+        Ok(InputReader { inner, compressed })
+    }
+
+    /// True when the input is gzip (or BGZF) compressed.
+    pub fn is_compressed(&self) -> bool {
+        self.compressed
     }
 
     /// Wrap the decompressed stream in a FASTQ reader.
@@ -468,21 +512,61 @@ impl RecordSource for SamSource {
     }
 }
 
+/// Random access into the stream a binary parser reads from. Streams
+/// (stdin, an already decompressed pipe) keep the default: no positions.
+trait Reposition {
+    fn position(&mut self) -> Option<u64> {
+        None
+    }
+
+    fn reposition(&mut self, _pos: u64) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+impl Reposition for Box<dyn BufRead> {}
+
+/// BAM files are read block by block, so positions are BGZF virtual offsets.
+impl Reposition for noodles_bgzf::io::Reader<BufReader<File>> {
+    fn position(&mut self) -> Option<u64> {
+        Some(u64::from(self.virtual_position()))
+    }
+
+    fn reposition(&mut self, pos: u64) -> io::Result<()> {
+        self.seek(noodles_bgzf::VirtualPosition::from(pos))
+            .map(|_| ())
+    }
+}
+
+/// CRAM files are read directly, so positions are byte offsets.
+impl Reposition for BufReader<File> {
+    fn position(&mut self) -> Option<u64> {
+        self.stream_position().ok()
+    }
+
+    fn reposition(&mut self, pos: u64) -> io::Result<()> {
+        Seek::seek(self, io::SeekFrom::Start(pos)).map(|_| ())
+    }
+}
+
 /// BAM parser built on `noodles`.
 ///
 /// BAM stores the same data as SAM, so the same rules apply: only QNAME, FLAG,
 /// SEQ and QUAL are used, secondary and supplementary alignments are skipped,
 /// and reverse-strand reads are flipped back to their original orientation.
 /// Missing qualities (all `0xFF` in BAM) become `qual: None`.
-pub struct BamSource {
-    reader: noodles_bam::io::Reader<Box<dyn BufRead>>,
+///
+/// `R` is either the BGZF reader of a file, which can seek by virtual offset,
+/// or an already decompressed stream (stdin), which cannot.
+pub struct BamSource<R> {
+    reader: noodles_bam::io::Reader<R>,
     scratch: noodles_bam::Record,
     record: Record,
     done: bool,
 }
 
-impl BamSource {
-    pub fn new(inner: Box<dyn BufRead>) -> Result<Self> {
+impl<R: Read> BamSource<R> {
+    pub fn new(inner: R) -> Result<Self> {
         let mut reader = noodles_bam::io::Reader::from(inner);
         reader
             .read_header()
@@ -497,7 +581,7 @@ impl BamSource {
     }
 }
 
-impl RecordSource for BamSource {
+impl<R: Read + Reposition> RecordSource for BamSource<R> {
     fn next_record(&mut self) -> Result<Option<&Record>> {
         if self.done {
             return Ok(None);
@@ -538,6 +622,24 @@ impl RecordSource for BamSource {
             return Ok(Some(&self.record));
         }
     }
+
+    /// Records are read one at a time straight from the BGZF reader, so its
+    /// virtual position is where the next record starts.
+    fn checkpoint(&mut self) -> Option<u64> {
+        if self.done {
+            return None;
+        }
+        self.reader.get_mut().position()
+    }
+
+    fn seek(&mut self, checkpoint: u64) -> Result<()> {
+        self.reader
+            .get_mut()
+            .reposition(checkpoint)
+            .context("Failed to seek in the BAM file")?;
+        self.done = false;
+        Ok(())
+    }
 }
 
 /// CRAM parser built on `noodles`.
@@ -548,8 +650,8 @@ impl RecordSource for BamSource {
 /// Everything below the container layer behaves like BAM: flags filter
 /// secondary/supplementary records, reverse-strand reads are flipped back, and
 /// missing qualities become `qual: None`.
-pub struct CramSource {
-    reader: noodles_cram::io::Reader<Box<dyn BufRead>>,
+pub struct CramSource<R> {
+    reader: noodles_cram::io::Reader<R>,
     header: noodles_sam::Header,
     reference: noodles_fasta::Repository,
     container: noodles_cram::io::reader::Container,
@@ -558,8 +660,8 @@ pub struct CramSource {
     done: bool,
 }
 
-impl CramSource {
-    pub fn new(inner: Box<dyn BufRead>, reference_path: &str) -> Result<Self> {
+impl<R: Read> CramSource<R> {
+    pub fn new(inner: R, reference_path: &str) -> Result<Self> {
         let mut reader = noodles_cram::io::Reader::new(inner);
         let header = reader
             .read_header()
@@ -647,7 +749,7 @@ impl CramSource {
     }
 }
 
-impl RecordSource for CramSource {
+impl<R: Read + Reposition> RecordSource for CramSource<R> {
     fn next_record(&mut self) -> Result<Option<&Record>> {
         loop {
             if let Some(src) = self.pending.next() {
@@ -662,6 +764,25 @@ impl RecordSource for CramSource {
                 return Ok(None);
             }
         }
+    }
+
+    /// Records are decoded a container at a time, so only the start of a
+    /// container is a position to come back to.
+    fn checkpoint(&mut self) -> Option<u64> {
+        if self.done || self.pending.len() > 0 {
+            return None;
+        }
+        self.reader.get_mut().position()
+    }
+
+    fn seek(&mut self, checkpoint: u64) -> Result<()> {
+        self.reader
+            .get_mut()
+            .reposition(checkpoint)
+            .context("Failed to seek in the CRAM file")?;
+        self.pending = Vec::new().into_iter();
+        self.done = false;
+        Ok(())
     }
 }
 
@@ -1496,6 +1617,99 @@ mod tests {
 
         assert_eq!(record.id(), "primary");
         assert!(source.next_record().unwrap().is_none());
+    }
+
+    /// Read every record, remembering each checkpoint, then seek back to the
+    /// checkpoints (last to first, so the reader moves backwards) and check
+    /// that reading continues with the same records.
+    fn assert_seeks_back_to_checkpoints(path: &str, reference: Option<&str>) -> usize {
+        let mut source = open_source(path, reference).expect("Failed to open input");
+        let mut records = Vec::new();
+        let mut checkpoints = Vec::new();
+        loop {
+            let checkpoint = source.checkpoint();
+            let Some(record) = next_owned(source.as_mut()).unwrap() else {
+                break;
+            };
+            if let Some(checkpoint) = checkpoint {
+                checkpoints.push((records.len(), checkpoint));
+            }
+            records.push(record);
+        }
+        assert_eq!(source.checkpoint(), None, "no checkpoint after the end");
+
+        for &(ordinal, checkpoint) in checkpoints.iter().rev() {
+            source.seek(checkpoint).expect("Failed to seek");
+            for expected in records.iter().skip(ordinal).take(3) {
+                let record = next_owned(source.as_mut()).unwrap().unwrap();
+                assert_eq!(&record, expected, "record after seeking to #{ordinal}");
+            }
+        }
+        checkpoints.len()
+    }
+
+    fn numbered_reads(n: usize) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+        (0..n)
+            .map(|i| {
+                let seq: Vec<u8> = (0..50).map(|j| b"ACGT"[(i * 7 + j) % 4]).collect();
+                let qual: Vec<u8> = (0..50).map(|j| b'#' + ((i + j) % 40) as u8).collect();
+                (format!("read{i}"), seq, qual)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_bam_file_seeks_to_every_record() {
+        use noodles_sam::alignment::record::Flags;
+        // ~5,000 records span many 64 KiB BGZF blocks.
+        let records = numbered_reads(5_000)
+            .iter()
+            .enumerate()
+            .map(|(i, (name, seq, qual))| {
+                // Every 10th read is a secondary alignment, which is skipped
+                // and must not shift the positions of the reads after it.
+                let flags = if i % 10 == 9 {
+                    Flags::SECONDARY
+                } else {
+                    Flags::UNMAPPED
+                };
+                bam_record(name, flags, seq, Some(qual))
+            })
+            .collect();
+        let file = create_temp_bam(records);
+        let path = file.path().to_str().unwrap();
+
+        let checkpoints = assert_seeks_back_to_checkpoints(path, None);
+        assert_eq!(checkpoints, 4_500, "a checkpoint before every BAM record");
+    }
+
+    #[test]
+    fn test_cram_file_seeks_to_container_starts() {
+        use noodles_sam::alignment::record::Flags;
+        let reference: Vec<u8> = b"ACGT".repeat(50);
+        // Containers hold up to 10,240 records, so this makes three.
+        let records = numbered_reads(25_000)
+            .iter()
+            .map(|(name, seq, qual)| cram_record(name, Flags::empty(), seq, Some(qual), 1))
+            .collect();
+        let (file, reference_file) = create_temp_cram(records, &reference);
+
+        let checkpoints = assert_seeks_back_to_checkpoints(
+            file.path().to_str().unwrap(),
+            reference_file.path().to_str(),
+        );
+        assert_eq!(checkpoints, 3, "one checkpoint per container");
+    }
+
+    #[test]
+    fn test_streamed_inputs_have_no_checkpoints() {
+        let fastq = create_temp_fastq(MULTI_RECORD_FASTQ);
+        let gz = create_temp_gzipped_fastq(MULTI_RECORD_FASTQ);
+        for file in [&fastq, &gz] {
+            let mut source = open_source(file.path().to_str().unwrap(), None).unwrap();
+            assert_eq!(source.checkpoint(), None);
+            assert!(source.seek(0).is_err());
+        }
     }
 
     #[test]
