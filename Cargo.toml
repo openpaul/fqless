@@ -8,7 +8,7 @@ license = "GPL-2.0-or-later"
 termion = "4.0"  
 ratatui = { version = "0.29", default-features = false, features = ["termion"] }         # TUI rendering
 anyhow = "1.0.98"        # Error handling
-flate2 = "1.0"           # Gzip compression support
+flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] } # Gzip support (zlib-rs: fast, pure Rust)
 bio = "2.3.0"
 aho-corasick = "1.1"
 memchr = "2.7"            # SIMD substring search
