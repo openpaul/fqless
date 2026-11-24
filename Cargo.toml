@@ -7,8 +7,6 @@ license = "GPL-2.0-or-later"
 [dependencies]
 termion = "4.0"  
 ratatui = { version = "0.29", default-features = false, features = ["termion"] }         # TUI rendering
-memmap2 = "0.9"          # Efficient file mapping
-rayon = "1.10"           # Parallel index building
 anyhow = "1.0.98"        # Error handling
 flate2 = "1.0"           # Gzip compression support
 bio = "2.3.0"
