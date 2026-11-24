@@ -962,9 +962,34 @@ impl TuiViewer {
             self.buffer_r2
                 .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
         }
-        let len = self.buffer.reads.read().unwrap().len() as u64;
+        let len = self.loaded_len();
         if len > 0 && self.current_position >= len {
             self.current_position = len - 1;
+        }
+        Ok(())
+    }
+
+    /// Number of records that can be shown. In paired mode the view zips R1
+    /// and R2, so only positions loaded in both files count.
+    fn loaded_len(&self) -> u64 {
+        let len = self.buffer.reads.read().unwrap().len() as u64;
+        if self.is_paired {
+            len.min(self.buffer_r2.reads.read().unwrap().len() as u64)
+        } else {
+            len
+        }
+    }
+
+    /// Move forward to `target` if that record exists; otherwise stay put, so
+    /// scrolling or paging past the last record keeps the last page on screen
+    /// instead of an empty one (and an empty input cannot underflow).
+    fn move_forward_to(&mut self, target: u64) -> Result<()> {
+        self.buffer.load_window(target, BUFFER_WINDOW_SIZE)?;
+        if self.is_paired {
+            self.buffer_r2.load_window(target, BUFFER_WINDOW_SIZE)?;
+        }
+        if target < self.loaded_len() {
+            self.current_position = target;
         }
         Ok(())
     }
@@ -1727,20 +1752,7 @@ impl TuiViewer {
                         } else if self.show_help {
                             self.help_scroll += 1;
                         } else {
-                            self.current_position += 1;
-                            self.buffer
-                                .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
-                            if self.is_paired {
-                                self.buffer_r2
-                                    .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
-                            }
-                            // if records are empty or we reached the end, don't go further
-                            if self.current_position
-                                >= self.buffer.reads.read().unwrap().len() as u64
-                            {
-                                self.current_position =
-                                    self.buffer.reads.read().unwrap().len() as u64 - 1;
-                            }
+                            self.move_forward_to(self.current_position + 1)?;
                         }
                     }
                     Key::Up | Key::Char('k') => {
@@ -1763,13 +1775,7 @@ impl TuiViewer {
                                 terminal_size.height as usize,
                                 terminal_size.width as usize,
                             )?;
-                            self.current_position = new_position;
-                            self.buffer
-                                .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
-                            if self.is_paired {
-                                self.buffer_r2
-                                    .load_window(self.current_position, BUFFER_WINDOW_SIZE)?;
-                            }
+                            self.move_forward_to(new_position)?;
                         }
                     }
                     Key::PageUp | Key::Char('K') => {
