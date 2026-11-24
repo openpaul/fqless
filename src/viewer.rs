@@ -2174,6 +2174,7 @@ impl TuiViewer {
                     Line::from("  PgUp/K     - Move up one page"),
                     Line::from("  PgDn/J/Spc - Move down one page"),
                     Line::from("  Home       - Go to first record"),
+                    Line::from("  End/G      - Go to last record (once all reads are counted)"),
                     Line::from(""),
                     Line::from("Display Options:"),
                     Line::from("  S          - Toggle no-wrap mode (horizontal scrolling)"),

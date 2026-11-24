@@ -6,7 +6,12 @@ fqless is a small less-like viewer for FastQ, FASTA, SAM, BAM and CRAM sequencin
 
 It displays the name and the color-coded sequence. It hides the quality line from the user, as this is machine information for machines and not for human beings.
 
-It has no problem opening many gigabytes of FASTQ files, as it will not load everything but will stream the reads.
+It has no problem opening many gigabytes of sequencing data: reads are streamed, and only a
+window of them around the current position is kept in memory. While the reads are counted in
+the background, BAM and CRAM files also get a small index of read positions, so jumping far
+ahead or back (`End`/`G`, `Home`, search matches with `n`/`N`) seeks instead of decoding
+everything in between. Text and gzipped formats cannot seek; going back before the loaded
+window reads them again from the start.
 It also spawns workers to build a FastQC-like stats page (access via pressing `s`). As such, after opening a file you will see high CPU usage as reads are counted and adapters are detected.
 
 fqless is released under the GPLv2 or any newer version of the GPL. It comes with no warranty. Use it as you wish.
