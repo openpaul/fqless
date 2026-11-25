@@ -306,13 +306,15 @@ impl PeptidePattern {
     }
 }
 
-/// A lowercase literal searched with SIMD `memmem`.
+/// A lowercase literal searched with SIMD `memmem`. The finder is boxed
+/// because its size depends on the target's SIMD support (over 300 bytes on
+/// x86_64), which would otherwise bloat every `Pattern`.
 #[derive(Clone)]
-struct Needle(memmem::Finder<'static>);
+struct Needle(Box<memmem::Finder<'static>>);
 
 impl Needle {
     fn new(bytes: &[u8]) -> Self {
-        Self(memmem::Finder::new(bytes).into_owned())
+        Self(Box::new(memmem::Finder::new(bytes).into_owned()))
     }
 
     fn is_match(&self, haystack: &[u8]) -> bool {
