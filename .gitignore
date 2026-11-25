@@ -14,3 +14,8 @@ Cargo.lock
 *fastq.gz
 example/*fastq.gz
 TODO.md
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
